@@ -1835,6 +1835,20 @@ Três correções decorrem disso, e nenhuma é opcional:
 
 Nada disso conserta a esparsidade do OSM — conserta o comportamento diante dela. Uma parada com a rua certa e posição aproximada dentro dela ordena uma rota corretamente; uma parada a 5 km inverte a sequência.
 
+### O baseline tem de ser fisicamente possível (medido na Task 15)
+
+Com a frota realista (2 poliguindastes, capacidade 1, 14 viagens/dia) a economia medida na locação caiu para **0,6%** — contra 36,8% com a frota-placeholder menor da Task 13. Investigado até a causa: **o baseline é infactível.**
+
+`LocacaoSource.baseline_order` particiona a ordem de lançamento em blocos de ~12 paradas e `measure_baseline` roteia cada bloco como uma volta contínua. Isso pressupõe um caminhão que sai com 12 caçambas. Um poliguindaste carrega **uma**, e volta ao depósito a cada uma ou duas paradas — restrição física, não escolha do otimizador.
+
+Ou seja: comparava-se uma rota otimizada que **obedece** a capacidade contra um baseline que **a ignora**. O otimizado é obrigado a fazer idas-e-vindas curtas, formato caro por natureza; o baseline encadeia doze paradas sem nunca voltar. O resultado subestima o ganho tanto quanto o bug anterior o superestimava.
+
+**Regra, a mesma que vale para o resto da comparação:** os dois lados obedecem às mesmas leis físicas e usam a mesma frota. A única diferença permitida é *quais paradas andam juntas e em que ordem* — nunca *se a rota é executável*.
+
+Implementação: o baseline da locação usa a **mesma lista de veículos expandida** que o otimizador (`expand_trips`), atribuindo as paradas em ordem de lançamento e respeitando a capacidade de cada viagem exatamente como o solver precisa respeitar. Entrega posterior não muda: ali o baseline é o veículo e a hora que o ERP registrou, factível por construção.
+
+O número que sair disso é o número. Pode ser maior ou menor que 0,6% — não ajustar frota nem particionamento para chegar a um valor desejado.
+
 ### Proximidade entra ANTES do score, não depois
 
 Depois da regra do número: locação 86%, entrega posterior travada em 56%. As que restam falham todas pelo mesmo motivo estrutural — **o nome é escolhido por score difuso e só então a geografia é consultada**. Uma homônima distante com score coincidentemente maior vence, e a rua certa, ali em Dourados, nunca chega a ser avaliada:
