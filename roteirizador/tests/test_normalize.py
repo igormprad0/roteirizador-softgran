@@ -112,3 +112,23 @@ def test_numero_do_campo_estruturado_tem_precedencia():
 def test_uf_do_campo_estruturado_tem_precedencia():
     n = normalize_address(_addr("RUA X, 1", cidade="SAO PAULO", uf="SP"))
     assert n.uf == "SP"
+
+
+# --- Casos adicionados na revisao: numero de casa correto quando ha
+# CASA/APTO/BLOCO/FUNDOS/KM no meio do endereco. Nao alteram nenhum dos 34
+# casos acima; apenas cobrem formatos reais que a implementacao original
+# (a do brief) processava errado -- ver relatorio de correcao para o
+# raciocinio por tras de cada valor esperado.
+@pytest.mark.parametrize("entrada,rua,numero,complemento", [
+    ("RUA A 100 CASA 2", "RUA A", "100", "CASA 2"),
+    ("AV MARCELINO PIRES, 123, APTO 4, BLOCO B",
+     "AVENIDA MARCELINO PIRES", "123", "APTO 4, BLOCO B"),
+    ("RUA X, 123, CASA B", "RUA X", "123", "CASA B"),
+    ("RUA X 45 FUNDOS", "RUA X", "45", "FUNDOS"),
+    ("RUA A, KM 5", "RUA A, KM 5", None, None),
+    ("ROD BR-163, KM 12", "RODOVIA BR-163, KM 12", None, None),
+    ("RUA MARILIA S/N", "RUA MARILIA", None, None),
+])
+def test_split_number_casos_adicionais_complemento_e_km(entrada, rua, numero, complemento):
+    street, num, comp = split_number(entrada)
+    assert (street, num, comp) == (rua, numero, complemento)

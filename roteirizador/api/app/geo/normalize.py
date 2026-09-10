@@ -27,15 +27,22 @@ _UFS = {"MS", "MT", "GO", "SP", "PR", "DF", "RJ", "MG"}
 # "Q 13 LT 06" | "LOTE 06 QUADRA 09" | "QD37" | "LT05"
 _QUADRA = re.compile(
     r"\b(?:Q|QD|QUADRA)\s*\.?\s*\d+[A-Z]?\b|\b(?:L|LT|LOTE)\s*\.?\s*\d+[A-Z]?\b")
-# "N/C" | "S/N" | "SN" no fim (com ou sem virgula antes) -> sem numero
+# "CASA 2" | "APTO 4" | "BLOCO B" | "FUNDOS" -- unidade dentro do lote,
+# sempre complemento, nunca o numero da casa.
+_UNIDADE = re.compile(r"\b(?:CASA|APTO|BLOCO|FUNDOS)\b\.?\s*[A-Z0-9]{0,3}\b")
+# "N/C" | "S/N" | "SN" no fim -> sem numero. A virgula antes e opcional: ERPs
+# escrevem tanto "RUA X, S/N" quanto "RUA X S/N" (ver test_split_number_
+# casos_adicionais_complemento_e_km, caso "RUA MARILIA S/N").
 _SEM_NUMERO = re.compile(r",?\s*(?:N/C|S/N|SN)\s*$")
 # numero no fim da string, com separador opcional por virgula/"N"/"Nº"/espaco,
 # tolerando sufixo "-A" e um trecho extra apos virgula (", ESPLANADA").
 # Nota: strip_accents(NFKD) decompoe "º" (ordinal masculino) para uma letra
 # "O" solta (nao e um combining mark, entao nao e removido) -- por isso "N"
 # tambem aceita ser seguido de "O" aqui.
+# (?<!KM) no ultimo ramo evita capturar o numero de uma marca rodoviaria
+# ("KM 5", "KM 12") como se fosse numero de casa.
 _NUMERO = re.compile(
-    r"(?:,\s*|\s+N[Oº°.]?\s*|\s+)(\d{1,6})(?:\s*-\s*[A-Z0-9]+)?\s*(?:,[^,]*)?$")
+    r"(?:,\s*|\s+N[Oº°.]?\s*|(?<!KM)\s+)(\d{1,6})(?:\s*-\s*[A-Z0-9]+)?\s*(?:,[^,]*)?$")
 
 
 def strip_accents(s: str) -> str:
@@ -64,24 +71,40 @@ def expand_abbreviations(s: str) -> str:
     return " ".join(parts)
 
 
+def _limpar(s: str) -> str:
+    """Colapsa espacos e series de virgulas (deixadas por tokens removidos)."""
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"(,\s*)+", ", ", s)
+    return s.strip().strip(",").strip()
+
+
 def split_number(s: str) -> tuple[str, str | None, str | None]:
     """Devolve (rua, numero, complemento). Aceita texto cru; normaliza internamente."""
     s = expand_abbreviations(strip_accents(s or "").upper())
 
-    complement = None
+    complement_parts: list[str] = []
+
     quadras = _QUADRA.findall(s)
     if quadras:
-        complement = " ".join(q.strip() for q in quadras)
+        complement_parts.extend(q.strip() for q in quadras)
         s = _QUADRA.sub(" ", s)
-    s = re.sub(r"\s+", " ", s).strip().strip(",").strip()
 
-    s = _SEM_NUMERO.sub("", s).strip().strip(",").strip()
+    unidades = _UNIDADE.findall(s)
+    if unidades:
+        complement_parts.extend(u.strip() for u in unidades)
+        s = _UNIDADE.sub(" ", s)
+
+    s = _limpar(s)
+    s = _SEM_NUMERO.sub("", s)
+    s = _limpar(s)
 
     number = None
     m = _NUMERO.search(s)
     if m:
         number = m.group(1)
-        s = s[: m.start()].strip().strip(",").strip()
+        s = _limpar(s[: m.start()])
+
+    complement = ", ".join(complement_parts) if complement_parts else None
     return s, number, complement
 
 
