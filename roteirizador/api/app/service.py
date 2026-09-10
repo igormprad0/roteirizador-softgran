@@ -104,10 +104,20 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
     opt = optimizer()
     solution = opt.solve(stops, fleet, depot)
 
+    # O comparativo só é honesto se os dois lados medirem o mesmo trabalho.
+    # A frota configurada pode não caber todas as paradas do dia (VROOM
+    # devolve `unassigned` para o que não coube) — medir o baseline contra
+    # TODAS as paradas enquanto o otimizado só serve um subconjunto infla a
+    # economia com o trabalho que simplesmente não foi feito, não com
+    # roteirização melhor. Restringe o baseline às paradas que a solução
+    # de fato atendeu.
+    atendidas_ids = {s.stop_external_id for r in solution.routes for s in r.steps}
+    atendidas = [s for s in stops if s.external_id in atendidas_ids]
+
     with connect(profile) as conn:
-        trips = build_source(profile, conn).baseline_order(stops)
+        trips = build_source(profile, conn).baseline_order(atendidas)
     aproximado = profile is Profile.LOCACAO
-    base = measure_baseline(trips, stops, OsrmClient(get_settings().osrm_url), depot,
+    base = measure_baseline(trips, atendidas, OsrmClient(get_settings().osrm_url), depot,
                             approximate=aproximado,
                             note=_APROX_LOCACAO if aproximado else "")
     comp = compare(solution, base, cost_per_km=cost_per_km)
@@ -124,7 +134,13 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
                        for u in solution.unassigned],
         "totals": {"distance_km": round(solution.total_distance_m / 1000, 1),
                    "duration_h": round(solution.total_duration_s / 3600, 1),
-                   "vehicles_used": len([r for r in solution.routes if r.steps])},
+                   "vehicles_used": len([r for r in solution.routes if r.steps]),
+                   # A economia acima só vale para estas paradas — não para
+                   # o dia inteiro. Quem lê o número precisa saber quanto
+                   # ficou de fora.
+                   "stops_total": len(stops),
+                   "stops_served": len(atendidas),
+                   "stops_unassigned": len(stops) - len(atendidas)},
         "comparison": comp.__dict__,
     }
     payload["run_id"] = st.save_run(profile, target_date.isoformat(), payload)

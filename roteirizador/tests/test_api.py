@@ -11,6 +11,30 @@ DIA_LOC = "2026-08-04"
 DIA_EP = "2026-08-13"
 
 
+def _baseline_km_sobre_todas_as_paradas(profile_str: str, dia: str) -> float:
+    """Recalcula o baseline SEM filtrar pelas paradas atendidas -- usado só
+    como teto de comparação nos testes, para garantir que o baseline
+    reportado por /api/optimize (que filtra para as paradas realmente
+    servidas) não pode ser maior nem igual a este."""
+    from api.app import service
+    from api.app.config import ImportMode, Profile
+    from api.app.db.firebird import connect
+    from api.app.erp.base import build_source
+    from api.app.routing.baseline import measure_baseline
+    from api.app.routing.osrm import OsrmClient
+
+    profile = Profile(profile_str)
+    stops, _ = service.import_stops(profile, date.fromisoformat(dia),
+                                    ImportMode.REPLANEJAR)
+    depot = service.store().get_depot(profile)
+    with connect(profile) as conn:
+        trips = build_source(profile, conn).baseline_order(stops)
+    base = measure_baseline(trips, stops,
+                            OsrmClient(service.get_settings().osrm_url), depot,
+                            approximate=True)
+    return base.total_distance_m / 1000
+
+
 def test_profiles():
     r = client.get("/api/profiles")
     assert r.status_code == 200
@@ -156,3 +180,37 @@ def test_romaneio_de_veiculo_inexistente_da_404():
     r = client.get(f"/api/runs/{body['run_id']}/romaneio.pdf",
                    params={"vehicle": "NAO_EXISTE#9"})
     assert r.status_code == 404
+
+
+@pytest.mark.erp
+@pytest.mark.slow
+def test_baseline_reflete_so_as_paradas_atendidas_quando_frota_nao_cobre_o_dia():
+    """Achado real: com a frota de 1 caminhão/capacidade 2 usada nos testes
+    acima, o VROOM deixa boa parte das ~38 paradas do dia sem atender. Medir
+    o baseline contra TODAS as paradas enquanto o otimizado só serve as que
+    coube na frota infla a economia reportada com trabalho que simplesmente
+    não foi feito -- não com uma rota melhor. O comparativo só pode citar
+    quilometragem do que os dois lados mediram igual."""
+    client.put("/api/depot", json={"profile": "locacao", "depot": {
+        "label": "Matriz", "lon": -54.8060, "lat": -22.2210,
+        "address": "Rua Ponta Porã, 1343"}})
+    client.put("/api/fleet", json={"profile": "locacao", "fleet": [
+        {"id": "MB", "label": "MB 1513", "placa": "KTD3645", "capacity": 2,
+         "trips": 6, "shift_start_s": 25200, "shift_end_s": 68400,
+         "enabled": True, "erp_id_veiculo": 2}]})
+
+    r = client.post("/api/optimize", json={"profile": "locacao", "date": DIA_LOC,
+                                           "mode": "replanejar", "cost_per_km": 3.5})
+    assert r.status_code == 200
+    body = r.json()
+    totals = body["totals"]
+
+    # a frota acima é deliberadamente pequena para o dia -- se algum dia
+    # passar a cobrir tudo, o teste deixou de testar o que pretende testar.
+    assert totals["stops_unassigned"] > 0, \
+        "frota do teste cobriu o dia inteiro -- ajustar para continuar exercitando o caso parcial"
+    assert totals["stops_served"] + totals["stops_unassigned"] == totals["stops_total"]
+    assert len(body["unassigned"]) == totals["stops_unassigned"]
+
+    teto = _baseline_km_sobre_todas_as_paradas("locacao", DIA_LOC)
+    assert body["comparison"]["baseline_km"] < teto
