@@ -87,7 +87,7 @@ Responsabilidades: `models.py` não importa nada do projeto (folha da árvore). 
 
 **Interfaces:**
 - Consumes: nada
-- Produces: serviços `osrm:5000`, `vroom:3000`, `firebird:3050`, `api:8000`. Env vars `OSRM_URL`, `VROOM_URL`, `LOCAL_DB`, `STREETS_DB`, `FDB_DIR`, `FB_USER`, `FB_PASSWORD`.
+- Produces: serviços `osrm:5000`, `vroom:3000`, `firebird:3050` (exposto em 3051 no host), `api:8000`. Env vars `OSRM_URL`, `VROOM_URL`, `LOCAL_DB`, `STREETS_DB`, `OSM_PBF`, `FDB_HOST`, `FB_USER`, `FB_PASSWORD`.
 
 - [ ] **Step 1: Criar a árvore do projeto e o `.gitignore`**
 
@@ -143,6 +143,11 @@ CMD ["uvicorn", "api.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 - [ ] **Step 4: `docker-compose.yml`**
 
+Três valores foram corrigidos durante a execução da Task 1 e já estão certos abaixo:
+`vroomvrp/vroom-docker` não existe no Docker Hub (o publicado é `ghcr.io/vroom-project/vroom-docker`),
+`firebirdsql/firebird:3.0` não existe (a tag é `3`), e a porta 3050 do host colide com
+o Firebird nativo instalado nesta máquina — daí `3051:3050`.
+
 ```yaml
 services:
   osrm:
@@ -152,7 +157,7 @@ services:
     ports: ["5000:5000"]
 
   vroom:
-    image: vroomvrp/vroom-docker:v1.14.0
+    image: ghcr.io/vroom-project/vroom-docker:v1.14.0
     environment:
       VROOM_ROUTER: osrm
       OSRM_HOST: osrm
@@ -162,13 +167,13 @@ services:
     depends_on: [osrm]
 
   firebird:
-    image: firebirdsql/firebird:3.0
+    image: firebirdsql/firebird:3
     environment:
       FIREBIRD_ROOT_PASSWORD: masterkey
       FIREBIRD_USER: rotas
       FIREBIRD_PASSWORD: rotas
     volumes: ["./data/fdb:/db"]
-    ports: ["3050:3050"]
+    ports: ["3051:3050"]     # 3050 do host já é do Firebird nativo desta máquina
 
   api:
     build: {context: ., dockerfile: Dockerfile.api}
@@ -211,10 +216,19 @@ Recorta para Mato Grosso do Sul antes de processar. O bbox cobre Dourados, Campo
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Git Bash/MSYS reescreve argumentos que parecem caminho POSIX antes do Docker
+# vê-los: "-w /d" vira "-w D:/" e o daemon recusa. Sem isto o script morre no
+# osmium extract e ainda cria um diretório lixo chamado "osm;D".
+export MSYS_NO_PATHCONV=1
+
 cd "$(dirname "$0")/../data/osm"
 
-curl -fL -o centro-oeste.osm.pbf \
-  https://download.geofabrik.de/south-america/brazil/centro-oeste-latest.osm.pbf
+# ~196 MB: não rebaixar se já veio inteiro numa execução anterior.
+if [ ! -s centro-oeste.osm.pbf ]; then
+  curl -fL -o centro-oeste.osm.pbf \
+    https://download.geofabrik.de/south-america/brazil/centro-oeste-latest.osm.pbf
+fi
 
 docker run --rm -v "$PWD:/d" -w /d stefda/osmium-tool \
   osmium extract --bbox -58.5,-24.5,-50.8,-17.0 \
