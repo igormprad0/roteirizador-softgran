@@ -36,15 +36,35 @@ _UNIDADE = re.compile(r"\b(?:CASA|APTO|BLOCO|FUNDOS)\b\.?\s*[A-Z0-9]{0,3}\b")
 # escrevem tanto "RUA X, S/N" quanto "RUA X S/N" (ver test_split_number_
 # casos_adicionais_complemento_e_km, caso "RUA MARILIA S/N").
 _SEM_NUMERO = re.compile(r",?\s*(?:N/C|S/N|SN)\s*$")
-# numero no fim da string, com separador opcional por virgula/"N"/"Nº"/espaco,
-# tolerando sufixo "-A" e um trecho extra apos virgula (", ESPLANADA").
-# Nota: strip_accents(NFKD) decompoe "º" (ordinal masculino) para uma letra
-# "O" solta (nao e um combining mark, entao nao e removido) -- por isso "N"
-# tambem aceita ser seguido de "O" aqui.
-# (?<!KM) no ultimo ramo evita capturar o numero de uma marca rodoviaria
-# ("KM 5", "KM 12") como se fosse numero de casa.
+# PRIMEIRO numero autonomo da string encerra o nome da rua -- tudo depois
+# dele e complemento/lixo, nunca nome (achado da revisao: "RUA ONOFRE
+# PEREIRA DE MATOS,970 CENTRO, 970" so bate com "RUA ONOFRE PEREIRA DE
+# MATOS" no indice se o "970 CENTRO" inteiro sai do nome, nao so o ultimo
+# numero). Por isso NAO e ancorado no fim da string ($) -- e o primeiro
+# candidato valido que vale, com re.search varrendo da esquerda.
+# Separador opcional por virgula/"N"/"Nº"/espaco antes do numero, sufixo
+# "-A" tolerado depois. Nota: strip_accents(NFKD) decompoe "º" (ordinal
+# masculino) para uma letra "O" solta (nao e um combining mark, entao nao e
+# removido) -- por isso "N" tambem aceita ser seguido de "O" aqui.
+# (?<!KM) evita capturar o numero de uma marca rodoviaria ("KM 5", "KM 12")
+# como se fosse numero de casa.
+# (?!\s+DE\b) e o que protege nomes de rua com data/numero embutido --
+# "RUA 13 DE MAIO 500", "25 DE MARCO 100", "AVENIDA 7 DE SETEMBRO 120" --
+# de serem cortados no numero errado: um numero seguido de " DE " e parte
+# do nome, nunca o numero de casa: continua a varredura ate achar o
+# proximo candidato (o numero de casa de verdade, mais adiante). O \b logo
+# apos o grupo de digitos e obrigatorio: sem ele, quando o lookahead nega
+# o casamento, o quantificador guloso \d{1,6} pode retroceder para MENOS
+# digitos so para escapar da negacao (ex.: "13" vira "1", deixando "3"
+# pendurado) -- \b falha entre dois digitos, entao barra esse retrocesso
+# e forca a busca a pular para o proximo candidato de verdade.
 _NUMERO = re.compile(
-    r"(?:,\s*|\s+N[Oº°.]?\s*|(?<!KM)\s+)(\d{1,6})(?:\s*-\s*[A-Z0-9]+)?\s*(?:,[^,]*)?$")
+    r"(?:,\s*|\s+N[Oº°.]?\s*|(?<!KM)\s+)(\d{1,6})\b(?!\s+DE\b)(?:\s*-\s*[A-Z0-9]+)?")
+
+# Anotacao solta entre parenteses no final do campo -- fechada ou nao (o
+# ERP as vezes trunca o campo no meio: "(fundos Ecov"). Nunca e nome de
+# rua nem numero; e descartada antes de qualquer outro processamento.
+_PAREN_FINAL = re.compile(r"\s*\([^)]*\)?\s*$")
 
 
 def strip_accents(s: str) -> str:
@@ -66,25 +86,33 @@ def normalize_city(raw: str | None, default_city: str = "DOURADOS",
     return _CIDADE_ALIAS.get(s, s) or default_city, uf
 
 
+_ABBREV_TOKEN = re.compile(r"^([A-Z]+)([.:])(.*)$")
+
+
 def expand_abbreviations(s: str) -> str:
     parts = re.sub(r"\s+", " ", s).strip().split(" ")
     if not parts:
         return " ".join(parts)
-    if parts[0].upper() in _ABBREV:
-        parts[0] = _ABBREV[parts[0].upper()]
+    primeiro = parts[0].upper()
+    if primeiro in _ABBREV:
+        parts[0] = _ABBREV[primeiro]
     else:
-        # Abreviação colada ao nome por ponto, sem espaço: "AV.MARCELINO",
-        # "R.JOAO", "ROD.BR-163". O primeiro token inteiro ("AV.MARCELINO")
-        # nunca bate no dicionário, então sem isto a abreviação nunca
-        # expande -- achado real: "AV.MARCELINO PIRES" não expande para
-        # "AVENIDA MARCELINO PIRES", e existe uma "RUA MARCELINO PIRES"
-        # genuína e distinta no índice que vence por fuzzy score quando a
-        # avenida fica sem a palavra completa.
-        prefixo, ponto, resto = parts[0].partition(".")
-        chave = (prefixo + ".").upper()
-        if ponto and resto and chave in _ABBREV:
-            parts[0] = _ABBREV[chave]
-            parts.insert(1, resto)
+        # Abreviação colada ao nome por ponto OU dois-pontos, sem espaço:
+        # "AV.MARCELINO", "AV:PRESIDENTE" (":" no lugar de "."), "R.JOAO",
+        # "ROD.BR-163". O primeiro token inteiro ("AV.MARCELINO") nunca bate
+        # no dicionário, então sem isto a abreviação nunca expande --
+        # achado real: "AV.MARCELINO PIRES" não expande para "AVENIDA
+        # MARCELINO PIRES", e existe uma "RUA MARCELINO PIRES" genuína e
+        # distinta no índice que vence por fuzzy score quando a avenida
+        # fica sem a palavra completa.
+        m = _ABBREV_TOKEN.match(primeiro)
+        if m:
+            prefixo, _sep, resto = m.groups()
+            chave = prefixo + "."  # ":" e "." sao a mesma abreviacao aqui
+            if chave in _ABBREV:
+                parts[0] = _ABBREV[chave]
+                if resto:
+                    parts.insert(1, resto)
     return " ".join(parts)
 
 
@@ -107,8 +135,17 @@ def split_number(s: str) -> tuple[str, str | None, str | None]:
     nome corrompido (achado da revisao). Quadra/lote continuam podendo
     aparecer antes OU depois do numero, pois o marcador ("Q13", "LT 06") e
     inconfundivel e nao colide com nomes de rua.
+
+    O PRIMEIRO numero autonomo da string encerra o nome da rua -- tudo
+    depois dele (bairro repetido, anotacao livre, o mesmo numero de novo)
+    e descartado do nome, nunca faz parte dele. Numeros que sao parte do
+    proprio nome da rua ("13 DE MAIO", "25 DE MARCO", "7 DE SETEMBRO") sao
+    protegidos porque um numero seguido de " DE " nunca e o numero de casa
+    -- ver `_NUMERO`.
     """
-    s = expand_abbreviations(strip_accents(s or "").upper())
+    s = re.sub(r"[\n\t]+", " ", s or "")
+    s = expand_abbreviations(strip_accents(s).upper())
+    s = _PAREN_FINAL.sub("", s)
 
     complement_parts: list[str] = []
 

@@ -163,3 +163,63 @@ def test_split_number_abreviacao_colada_sem_espaco():
     street, num, _ = split_number("AV.MARCELINO PIRES, 5285")
     assert street == "AVENIDA MARCELINO PIRES"
     assert num == "5285"
+
+
+# --- Fix round 3/5 do geocoder: o primeiro numero autonomo da string
+# encerra o nome da rua -- tudo depois dele (bairro repetido, anotacao
+# livre, o mesmo numero de novo) nunca faz parte do nome. Medido contra o
+# indice real: em quase todos os enderecos que caiam em "low" na Fix Round
+# 2, a rua correta EXISTE no indice (ex.: "RUA ONOFRE PEREIRA DE MATOS"),
+# so o texto colado depois do numero derrubava o fuzzy score.
+@pytest.mark.parametrize("entrada,rua_esperada", [
+    ("RUA ONOFRE PEREIRA DE MATOS,970 CENTRO, 970", "RUA ONOFRE PEREIRA DE MATOS"),
+    ("BARAO DO RIO BRANCO 395 JARDIM TROPICAL", "BARAO DO RIO BRANCO"),
+    ("CORONEL PONCIANO 1425 NOVA DOURADOS", "CORONEL PONCIANO"),
+    ("SANTOS DUMONT MARMITARIA, 1361", "SANTOS DUMONT MARMITARIA"),
+    ("Aurora Augusta de Matos, 3600 (fundos Ecov", "AURORA AUGUSTA DE MATOS"),
+    ("Rua Antonio E. de Figueiredo, 2280 Esq. Ca", "RUA ANTONIO E. DE FIGUEIREDO"),
+    ("RUA PROJETADA A, 285\nC VALDEREZ OLIVEIRA", "RUA PROJETADA A"),
+    ("AV: PRESIDENTE VARGAS, LT1 Q 18(4948)", "AVENIDA PRESIDENTE VARGAS"),
+    ("ALAMENDA DAS HORTENCIAS 225, 225", "ALAMENDA DAS HORTENCIAS"),
+    ("IPANEMA LOTE 06 QUADRA 09, 725", "IPANEMA"),
+])
+def test_split_number_numero_encerra_o_nome_da_rua(entrada, rua_esperada):
+    street, _, _ = split_number(entrada)
+    assert street == rua_esperada
+
+
+@pytest.mark.parametrize("entrada,rua_esperada,numero_esperado", [
+    ("RUA 13 DE MAIO 500", "RUA 13 DE MAIO", "500"),
+    ("25 DE MARCO 100", "25 DE MARCO", "100"),
+    ("AVENIDA 7 DE SETEMBRO 120 CASA 2", "AVENIDA 7 DE SETEMBRO", "120"),
+])
+def test_split_number_numero_seguido_de_de_e_parte_do_nome(entrada, rua_esperada, numero_esperado):
+    """Um numero seguido de ' DE ' (data historica: '13 de Maio', '25 de
+    Março', '7 de Setembro' são nomes de rua correntes no Brasil) nunca é o
+    numero de casa, mesmo sendo o primeiro numero autonomo da string --
+    a varredura continua até achar o número de casa de verdade, mais
+    adiante."""
+    street, num, _ = split_number(entrada)
+    assert (street, num) == (rua_esperada, numero_esperado)
+
+
+def test_expand_abbreviations_dois_pontos_no_lugar_do_ponto():
+    """':' às vezes substitui '.' na abreviação ('AV: PRESIDENTE VARGAS')."""
+    assert expand_abbreviations("AV: PRESIDENTE VARGAS") == "AVENIDA PRESIDENTE VARGAS"
+
+
+def test_split_number_normaliza_quebra_de_linha_e_tab():
+    street, num, _ = split_number("RUA PROJETADA A, 285\tC VALDEREZ OLIVEIRA")
+    assert street == "RUA PROJETADA A"
+    assert num == "285"
+
+
+@pytest.mark.parametrize("entrada,rua_esperada", [
+    ("AVENIDA PRESIDENTE VARGAS, LT1 Q 18(4948)", "AVENIDA PRESIDENTE VARGAS"),
+    ("AURORA AUGUSTA DE MATOS, 3600 (FUNDOS ECOVILLE", "AURORA AUGUSTA DE MATOS"),
+])
+def test_split_number_descarta_parenteses_finais_fechado_ou_truncado(entrada, rua_esperada):
+    """Anotação solta entre parênteses no final do campo -- o ERP às vezes
+    trunca o campo no meio, sem fechar o parêntese ('(fundos Ecov')."""
+    street, _, _ = split_number(entrada)
+    assert street == rua_esperada
