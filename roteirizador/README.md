@@ -24,11 +24,41 @@ Medidos contra a API viva, com `local.db` recriado do zero (cache de
 geocodificação vazio) e a frota de `scripts/seed_demo.py`. Três execuções
 de cada dia deram o mesmo número.
 
-| Perfil / dia | Paradas atendidas | Distância | Cobertura com a mesma frota | Baseline |
+| Perfil / dia | Paradas atendidas | Distância | Ordenação do baseline | Cobertura com a mesma frota |
 |---|---|---|---|---|
-| **Locação** — 04/08/2026 | 25 de 38 | **19,0% menos km** (119,0 → 96,4) | 25 otimizado vs. 25 na ordem de lançamento | aproximado |
-| **Entrega posterior** — 13/08/2026 | 17 de 18 | **27,7% menos km** (278,6 → 201,5) | 17 vs. 17 | parcialmente reconstruído |
-| **Entrega posterior** — 09/12/2024 (pico) | 128 de 215 | **77,6% menos km** (401,5 → 89,8) | 128 vs. 128 | reconstruído — ver ressalva |
+| **Locação** — 04/08/2026 | 25 de 38 | **19,0% menos km** (119,0 → 96,4) | ordem registrada | 25 otimizado vs. 25 |
+| **Entrega posterior** — 13/08/2026 | 17 de 18 | **27,3% menos km** (277,1 → 201,5) | vizinho mais próximo | 17 vs. 17 |
+| **Entrega posterior** — 09/12/2024 (pico) | 128 de 215 | **52,5% menos km** (189,3 → 89,8) | vizinho mais próximo | 128 vs. 128 |
+
+### Contra qual ordenação o número é medido
+
+A ordem que o ERP registra **não carrega informação espacial nenhuma**.
+Dez embaralhamentos aleatórios das paradas de cada dia, pelo mesmo OSRM e
+nas mesmas viagens, medem o mesmo que ela: pico 401,5 km contra 407,4 de
+média aleatória (371,8–422,5), 13/08 278,6 contra 283,3 (266,6–292,1),
+locação 119,0 contra 121,8 (113,9–129,2). Os três baselines caíam **dentro
+da própria faixa aleatória** — a "economia" estava sendo medida contra um
+sorteio, e o despachante de um cliente não é um gerador de números
+aleatórios: ele dirige para a parada mais próxima.
+
+Por isso o baseline hoje mede **cada viagem em duas ordens** — a
+registrada/de lançamento e a de **vizinho mais próximo** das mesmas paradas
+— e fica com a **mais curta**. A composição das viagens não muda: só a
+ordem dentro de cada uma, com o mesmo OSRM, o mesmo tempo de serviço e a
+mesma volta ao depósito dos dois lados. O guloso obedece à física de carga
+(com capacidade 1, coletar antes de entregar não cabe) e, quando não fecha
+a viagem, vale a ordem registrada. `comparison.baseline_method` diz qual
+ordenação respondeu pela maior parte da quilometragem, e cada viagem em
+`baseline.trips` traz o seu `method`.
+
+O efeito é desigual **por construção**, e é isso que mostra que o método
+está certo: o dia de pico tem ~16 paradas por viagem, onde a ordem domina,
+e caiu de 77,6% para 52,5%; 13/08 e locação têm 4 e 1,8 paradas por viagem,
+quase nada para errar na ordem, e praticamente não mudaram (27,7% → 27,3%,
+19,0% → 19,0%) — nesses dois o ganho vem da **composição** das viagens, que
+sempre foi legítima. Na locação nenhuma viagem trocou de ordem: com
+capacidade 1 e pares entrega+coleta, a única troca possível é a que a
+física proíbe.
 
 **Os três baselines carregam `approximate = true`, e isso não é detalhe de
 rodapé: é a diferença entre um número e um número verificável.** A regra
@@ -50,11 +80,15 @@ o baseline ser em parte RECONSTRUÍDO, não de ser impossível:
   Em 13/08 são 4 das 17 paradas atendidas; **no dia de pico são 127 das
   128**, quase todas sob `BAIXA DV`, que é baixa administrativa e não
   rota. Para essas, a viagem é reconstruída na ordem do campo `HORA` — que
-  neste ERP é horário de digitação, não de despacho. **O 77,6% do dia de
-  pico é, portanto, indicativo: mede uma boa rota contra uma ordem de
-  digitação, não contra o que a operação de fato fez.** Os 27,7% de 13/08
-  são o número mais defensável dos três: ali a maior parte das paradas tem
-  caminhão registrado de verdade.
+  neste ERP é horário de digitação, não de despacho — mas a ordem
+  registrada deixou de ser a régua: aquelas viagens são medidas também
+  contra um despacho por vizinho mais próximo, que é o que um operador de
+  verdade faz. **O valor do dia de pico é sobretudo escala** (215 paradas,
+  166 endereços distintos, 13 s com cache quente); os 52,5% vêm depois
+  disso, e agora são contra um despachante competente, não contra a ordem
+  de digitação. Os 27,3% de 13/08 seguem sendo o número com o baseline
+  mais próximo do registro real: ali a maior parte das paradas tem caminhão
+  de verdade registrado.
 
 Números que este README já anunciou e que **não sobreviveram à medição**,
 registrados aqui porque foi conferindo cada um deles que os defeitos
@@ -66,9 +100,14 @@ fosse o dado. Corrigido, os dois lados cobrem as **mesmas 25 paradas**, e o
 ganho da locação aparece onde sempre esteve: em distância, 19,0%. E o
 `77,0%` do dia de pico vinha comparado contra uma volta contínua de 125
 paradas / 31,6 h de um caminhão que não existe, com `approximate = false`.
+Corrigido aquilo, o número ficou em `77,6%` — e caiu para **52,5%** quando
+o baseline passou a ser medido também contra um despacho por vizinho mais
+próximo: os 25 pontos de diferença eram a ordem de digitação do ERP, que
+mede o mesmo que embaralhar as paradas.
 
 `comparison` traz tudo estruturado: `percent_km_saved`,
-`baseline_stops`/`optimized_stops` (cobertura), `approximate` e `note`; o
+`baseline_stops`/`optimized_stops` (cobertura), `baseline_method`
+(`registrada` ou `vizinho_mais_proximo`), `approximate` e `note`; o
 payload de `/api/optimize` traz ainda `baseline.trips` (cada viagem suposta,
 com km e horas medidos) e `baseline.infeasible`.
 
@@ -78,7 +117,7 @@ com km e horas medidos) e `baseline.infeasible`.
 a **R$ 3,50/km** (`cost_per_km`, ajustável na chamada). Não é medição: é
 uma conta de guardanapo em cima de uma amostra de um dia, e o custo por km
 é um palpite razoável, não um dado do cliente. Nos dias acima dá R$
-1.738,66 (locação), R$ 5.938,24 (13/08) e R$ 23.994,89 (pico) por mês.
+1.738,66 (locação), R$ 5.815,66 (13/08) e R$ 7.654,88 (pico) por mês.
 Apresentar como ordem de grandeza — e, de preferência, pedir o custo/km
 real do cliente antes de mostrar.
 
@@ -136,24 +175,30 @@ diferentes).
    paradas do dia — as outras 13 não cabem na frota/janela do dia e aparecem
    destacadas, não escondidas.
 3. Painel **Hoje vs Otimizado**: **19,0% menos km** (119,0 → 96,4) sobre as
-   mesmas 25 paradas, com a mesma frota dos dois lados. A KPI "Paradas com a
+   mesmas 25 paradas, com a mesma frota dos dois lados. A KPI "Rota atual"
+   diz contra qual ordenação isso foi medido — neste dia, a registrada. A KPI "Paradas com a
    mesma frota" mostra 25 vs. 25 — um despacho razoável na ordem de
    lançamento cobre o mesmo dia; o que a otimização economiza aqui é
    distância, não cobertura. Dizer que o baseline é aproximado (o ERP não
    registra veículo nem ordem para locação) — isso constrói credibilidade, e
    a ressalva já aparece na tela sozinha.
-4. **Entrega posterior, 13/08/2026** — **liderar com a KPI de km: 27,7%**
-   (278,6 → 201,5), 17 das 18 paradas. É o número mais defensável do
-   conjunto: a maior parte das paradas do dia tem caminhão de verdade
-   registrado no ERP.
-5. **Dia de pico, 09/12/2024** — 215 paradas, para mostrar que escala.
-   **Aviso antes de clicar:** com o cache de geocodificação frio (primeira
-   vez que este dia roda numa instalação nova) leva ~45s; com o cache
-   quente, 12-13s. Se demorar, não travou. E **ao mostrar o 77,6%, ler a
-   ressalva junto**: 127 das 128 paradas atendidas estavam numa caixa de
-   despacho do ERP (`ENTREGA DUVIDOSA / BAIXA DV`), não num caminhão, então
-   o baseline desse dia é reconstruído a partir da ordem de digitação. É
-   um número indicativo de escala, não a economia daquele dia.
+4. **Entrega posterior, 13/08/2026** — **liderar com a KPI de km: 27,3%**
+   (277,1 → 201,5), 17 das 18 paradas. É o número com o baseline mais
+   próximo do registro real: a maior parte das paradas do dia tem caminhão
+   de verdade registrado no ERP.
+5. **Dia de pico, 09/12/2024 — este dia é sobre ESCALA.** 215 paradas
+   importadas, 166 endereços distintos geocodificados, 128 atendidas em 11
+   viagens, **13 s** com o cache quente. É a prova de que a ferramenta
+   aguenta o pior dia do cliente, e é isso que se lidera aqui. **Aviso
+   antes de clicar:** com o cache de geocodificação frio (primeira vez que
+   este dia roda numa instalação nova) leva ~45s; se demorar, não travou.
+   Só **depois da escala**, mencionar a economia: **52,5%** (189,3 → 89,8),
+   agora medida contra um despachante que vai sempre à parada mais próxima
+   — não contra a ordem de digitação do ERP, que era o que sustentava o
+   77,6% anterior. A ressalva continua valendo e está na tela: 127 das 128
+   paradas atendidas estavam numa caixa de despacho (`ENTREGA DUVIDOSA /
+   BAIXA DV`), não num caminhão, então a composição das viagens desse dia é
+   reconstruída.
 6. Abrir um romaneio PDF (traz um link do Waze por parada e o link da rota
    inteira no Google Maps) e baixar o CSV.
 
@@ -168,11 +213,11 @@ diferentes).
   |---|---|---|
   | Locação 04/08/2026 | 34/38 = **89%** | 31 |
   | Entrega 13/08/2026 | 14/18 = **78%** | 15 |
-  | Pico 09/12/2024 | 188/215 = **87%** | 168 |
+  | Pico 09/12/2024 | 188/215 = **87%** | 166 |
 
   **Zero resultados de alta/média confiança apontando para fora da cidade
   informada, nos três dias.** O dia de pico é a amostra que sustenta o
-  número: 168 endereços distintos, contra 15 e 31 dos dias da demo. O
+  número: 166 endereços distintos, contra 15 e 31 dos dias da demo. O
   restante entra na fila de revisão manual (arrastar o pino no mapa). O
   que sobra em `low` é lacuna de dado real: rua ausente do extrato OSM,
   propriedade rural sem nome de logradouro, condomínio não mapeado,
@@ -241,8 +286,8 @@ diferentes).
 - **O dia de pico leva ~45s na primeira execução de uma instalação nova, e
   12-13s depois disso.** A diferença é o cache de geocodificação: são 215
   endereços resolvidos contra o índice de ruas na primeira vez, e leitura de
-  cache nas seguintes (medido: 44,3s a frio, 12,7s e 12,9s a quente, no
-  mesmo ambiente). Isto provavelmente explica os 45-49s "sob carga" que
+  cache nas seguintes (medido nesta remedicao, com o `local.db` recriado
+  do zero: 45,1s a frio e 12,9s a quente, no mesmo ambiente). Isto provavelmente explica os 45-49s "sob carga" que
   versões anteriores deste README atribuíam a contenção de CPU — foi
   observado justamente depois de o cache ter sido limpo, e um revisor numa
   segunda máquina, com cache quente, nunca reproduziu. O critério de 30s do
