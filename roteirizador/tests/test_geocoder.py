@@ -206,6 +206,10 @@ def geo_colisao(tmp_path):
     c.execute("INSERT INTO place VALUES ('bairro','AGUA BOA','',-54.6300,-20.5000)")
     c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
     c.execute("INSERT INTO place VALUES ('cidade','CAMPO GRANDE','',-54.6133,-20.4614)")
+    # So existe perto de Campo Grande -- nao tem homonimo em Dourados nenhum.
+    c.execute("INSERT INTO street VALUES (5,'Rua Distante Unica','RUA DISTANTE UNICA','',"
+              "'[[-54.6200,-20.4700],[-54.6100,-20.4700]]',-54.62,-20.47,-54.61,-20.47)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA DISTANTE UNICA','',5)")
     c.commit(); c.close()
     store = LocalStore(tmp_path / "local.db"); store.init_schema()
     return Geocoder(idx, store)
@@ -267,3 +271,131 @@ def test_bairro_tolera_prefixo_mas_ainda_respeita_raio_da_cidade(geo_colisao):
                                   bairro="JARDIM AGUA BOA"))
     assert r.source == "bairro"
     assert (r.lon, r.lat) == pytest.approx((-54.8150, -22.2800))
+
+
+# ---- particionar por proximidade antes de pontuar (fix round 4/5) ---------
+# A revisão achou o defeito raiz: a seleção de nome por fuzzy score
+# acontecia SEM nenhuma informação geográfica, então um nome errado só
+# coincidentemente melhor pontuado (ou empatado, desfeito por ordem
+# arbitrária) vencia o nome certo que existia bem mais perto. Os dois
+# fixtures abaixo usam os textos e os scores REAIS medidos contra o índice
+# de Dourados (verificados isoladamente com rapidfuzz antes de escrever o
+# fixture) para reproduzir os dois achados sem depender do índice real.
+
+def test_rua_que_so_existe_longe_ainda_resolve_com_confianca_baixa(geo_colisao):
+    """Uma rua real que só existe longe da cidade do endereço deve resolver
+    -- a posição existe e vale mais que nada -- mas nunca com confiança
+    alta ou média, que soaria como um acerto local confiável."""
+    _, r = geo_colisao.geocode(_a("RUA DISTANTE UNICA", cidade="DOURADOS"))
+    assert r.confidence == "low"
+    assert r.source == "street_fuzzy"
+    assert r.lat == pytest.approx(-20.47, abs=0.02)
+
+
+@pytest.fixture
+def geo_prioridade(tmp_path):
+    idx = tmp_path / "streets.db"
+    c = sqlite3.connect(idx)
+    c.executescript("""
+      CREATE TABLE street (street_id INTEGER PRIMARY KEY, name TEXT, name_norm TEXT,
+        city_norm TEXT, coords_json TEXT, min_lon REAL, min_lat REAL,
+        max_lon REAL, max_lat REAL);
+      CREATE VIRTUAL TABLE street_fts USING fts5(name_norm, city_norm,
+        street_id UNINDEXED, tokenize='unicode61');
+      CREATE TABLE housenumber (street_norm TEXT, city_norm TEXT, number TEXT,
+        lon REAL, lat REAL);
+      CREATE TABLE place (kind TEXT, name_norm TEXT, city_norm TEXT, lon REAL, lat REAL);
+    """)
+    # Caso real 1: "SANTOS DUMONT MARMITARIA" -> "RUA SANTOS DUMONT" (perto,
+    # WRatio 82,3) perdia para "AVENIDA ARISTIDES CRISOSTOMO DOS SANTOS"
+    # (longe, WRatio 85,5) quando a pontuação não sabia de geografia.
+    c.execute("INSERT INTO street VALUES (1,'Rua Santos Dumont','RUA SANTOS DUMONT','',"
+              "'[[-54.80,-22.21],[-54.79,-22.21]]',-54.80,-22.21,-54.79,-22.21)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA SANTOS DUMONT','',1)")
+    c.execute("INSERT INTO street VALUES (2,'Avenida Aristides Crisostomo Dos Santos',"
+              "'AVENIDA ARISTIDES CRISOSTOMO DOS SANTOS','',"
+              "'[[-56.00,-25.00],[-55.99,-25.00]]',-56.00,-25.00,-55.99,-25.00)")
+    c.execute("INSERT INTO street_fts VALUES "
+              "('AVENIDA ARISTIDES CRISOSTOMO DOS SANTOS','',2)")
+    # Caso real 2: "VEREADOR AGUIAR DE SOUZA" empatava EXATAMENTE (WRatio
+    # 85,5) entre "RUA VEREADOR AGUIAR FERREIRA DE SOUZA" (perto, certa) e
+    # "RUA DOS SOUZA" (longe, sem relação) -- o desempate por ordem de
+    # iteração de um set escolhia a errada.
+    c.execute("INSERT INTO street VALUES (3,'Rua Vereador Aguiar Ferreira de Souza',"
+              "'RUA VEREADOR AGUIAR FERREIRA DE SOUZA','',"
+              "'[[-54.80,-22.24],[-54.79,-22.24]]',-54.80,-22.24,-54.79,-22.24)")
+    c.execute("INSERT INTO street_fts VALUES "
+              "('RUA VEREADOR AGUIAR FERREIRA DE SOUZA','',3)")
+    c.execute("INSERT INTO street VALUES (4,'Rua Dos Souza','RUA DOS SOUZA','',"
+              "'[[-56.00,-25.00],[-55.99,-25.00]]',-56.00,-25.00,-55.99,-25.00)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA DOS SOUZA','',4)")
+    c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
+    c.commit(); c.close()
+    store = LocalStore(tmp_path / "local.db"); store.init_schema()
+    return Geocoder(idx, store)
+
+
+def test_perto_vence_longe_mesmo_com_score_menor(geo_prioridade):
+    """Achado real: 'SANTOS DUMONT MARMITARIA' -> 'RUA SANTOS DUMONT' (perto,
+    score 82,3) perdia para 'AVENIDA ARISTIDES CRISOSTOMO DOS SANTOS'
+    (longe, score 85,5) porque a pontuação era global, sem geografia."""
+    _, r = geo_prioridade.geocode(_a("SANTOS DUMONT MARMITARIA", cidade="DOURADOS"))
+    assert r.matched_text == "RUA SANTOS DUMONT"
+    assert r.lat == pytest.approx(-22.21, abs=0.02)
+
+
+def test_empate_de_score_e_desfeito_pela_proximidade(geo_prioridade):
+    """Achado real: 'VEREADOR AGUIAR DE SOUZA' empatava exatamente (85,5)
+    entre a rua certa (perto) e uma rua completamente diferente (longe); o
+    desempate por ordem de iteração de um set escolhia a errada."""
+    _, r = geo_prioridade.geocode(_a("VEREADOR AGUIAR DE SOUZA", cidade="DOURADOS"))
+    assert r.matched_text == "RUA VEREADOR AGUIAR FERREIRA DE SOUZA"
+    assert r.lat == pytest.approx(-22.24, abs=0.02)
+
+
+@pytest.fixture
+def geo_conectivo(tmp_path):
+    """Achado real: 'ALAMEDA DAS HORTENCIAS' tem 7 segmentos no índice, 3
+    perto de Dourados -- mas a busca FTS incluía 'DAS' como termo, um
+    conectivo tão comum em nomes de logradouro que sozinho enchia o
+    LIMIT 400 com ruas sem nenhuma relação, e só UM segmento sobrevivia:
+    o distante. Este fixture simula isso com muitos decoys que só
+    compartilham 'DAS'."""
+    idx = tmp_path / "streets.db"
+    c = sqlite3.connect(idx)
+    c.executescript("""
+      CREATE TABLE street (street_id INTEGER PRIMARY KEY, name TEXT, name_norm TEXT,
+        city_norm TEXT, coords_json TEXT, min_lon REAL, min_lat REAL,
+        max_lon REAL, max_lat REAL);
+      CREATE VIRTUAL TABLE street_fts USING fts5(name_norm, city_norm,
+        street_id UNINDEXED, tokenize='unicode61');
+      CREATE TABLE housenumber (street_norm TEXT, city_norm TEXT, number TEXT,
+        lon REAL, lat REAL);
+      CREATE TABLE place (kind TEXT, name_norm TEXT, city_norm TEXT, lon REAL, lat REAL);
+    """)
+    decoy_pts = json.dumps([[-50.0, -10.0], [-49.99, -10.0]])
+    for i in range(410):
+        sid = 1000 + i
+        c.execute(
+            "INSERT INTO street VALUES (?,?,?,?,?,?,?,?,?)",
+            (sid, "Rua Das Decoy", "RUA DAS DECOY", "", decoy_pts,
+             -50.0, -10.0, -49.99, -10.0))
+        c.execute("INSERT INTO street_fts VALUES ('RUA DAS DECOY','',?)", (sid,))
+    c.execute("INSERT INTO street VALUES (1,'Alameda das Hortencias',"
+              "'ALAMEDA DAS HORTENCIAS','','[[-54.808,-22.213],[-54.807,-22.213]]',"
+              "-54.808,-22.213,-54.807,-22.213)")
+    c.execute("INSERT INTO street_fts VALUES ('ALAMEDA DAS HORTENCIAS','',1)")
+    c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
+    c.commit(); c.close()
+    store = LocalStore(tmp_path / "local.db"); store.init_schema()
+    return Geocoder(idx, store)
+
+
+def test_conectivo_nao_esgota_o_limite_da_busca(geo_conectivo):
+    """'DAS' sozinho não pode consumir o LIMIT 400 da busca FTS com 410
+    ruas que não têm nada a ver -- a rua certa (com o erro de digitação
+    real do ERP, 'ALAMENDA') tem que ser encontrada mesmo assim."""
+    _, r = geo_conectivo.geocode(_a("ALAMENDA DAS HORTENCIAS"))
+    assert r.source == "street_fuzzy"
+    assert r.confidence in ("high", "medium")
+    assert r.lat == pytest.approx(-22.213, abs=0.01)

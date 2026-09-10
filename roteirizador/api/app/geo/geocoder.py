@@ -28,6 +28,16 @@ _FTS_SAFE = re.compile(r"[^A-Z0-9 ]")
 _TIPO_VIA = {"RUA", "AVENIDA", "RODOVIA", "ALAMEDA", "TRAVESSA", "PRACA",
              "ESTRADA", "LARGO", "MARGINAL"}
 
+# Conectivos gramaticais: nao distinguem rua nenhuma, so ocupam vaga no
+# LIMIT da busca FTS. Achado real: "ALAMEDA DAS HORTENCIAS" tem 7 segmentos
+# no indice (3 perto de Dourados), mas a busca "ALAMENDA OR DAS OR
+# HORTENCIAS" gastava o LIMIT 400 inteiro em ruas que so compartilhavam a
+# palavra "DAS" (frequentissima em nomes de logradouro) e devolvia UM UNICO
+# segmento -- que por acaso era o distante. "DE/DA/DO/E" ja saiam pelo
+# filtro de tamanho (`len(t) > 2`); ficam aqui mesmo assim para o filtro
+# nao depender silenciosamente desse efeito colateral.
+_CONECTIVOS = {"DAS", "DOS", "DE", "DA", "DO", "E"}
+
 # Diferença máxima (em número de porta) para confiar no vizinho conhecido
 # mais próximo como posição, ao interpolar dentro de UMA MESMA cidade.
 # Quarteirões urbanos avançam em dezenas por lote; um vizinho a mais de 200
@@ -199,7 +209,7 @@ class Geocoder:
 
     def _candidates(self, con, n: NormalizedAddress) -> list[sqlite3.Row]:
         tokens = [t for t in _FTS_SAFE.sub(" ", n.street).split() if len(t) > 2]
-        terms = [t for t in tokens if t not in _TIPO_VIA]
+        terms = [t for t in tokens if t not in _TIPO_VIA and t not in _CONECTIVOS]
         if not terms:
             terms = tokens
         if not terms:
@@ -217,20 +227,41 @@ class Geocoder:
     def _by_street(self, con, n: NormalizedAddress,
                    city_centro: tuple[float, float] | None) -> GeoResult | None:
         """Casa o nome da via, escolhe entre os segmentos homônimos pelo bairro
-        (ou pela cidade), e só então posiciona o ponto dentro do segmento."""
+        (ou pela cidade), e só então posiciona o ponto dentro do segmento.
+
+        A pontuação fuzzy acontece SEPARADAMENTE por partição geográfica —
+        primeiro entre os candidatos perto da cidade, e só se nenhum bater
+        aí é que os distantes entram na disputa. Antes disso, um nome
+        errado mas coincidentemente melhor pontuado (`"AVENIDA ARISTIDES
+        CRISOSTOMO DOS SANTOS"`, 85,5, batendo `"RUA SANTOS DUMONT"`, 82,3)
+        ou um empate exato desfeito por ordem arbitrária de iteração
+        (`"RUA DOS SOUZA"` empatado 85,5 com `"RUA VEREADOR AGUIAR FERREIRA
+        DE SOUZA"`, a rua certa, perto) vencia a rua certa que existia bem
+        mais perto — o score global não sabia de geografia. Particionar
+        antes de pontuar resolve isso na raiz, não com um portão no fim.
+        """
         if not n.street:
             return None
         rows = self._candidates(con, n)
         if not rows:
             return None
 
-        nomes = {r["name_norm"] for r in rows}
-        best = process.extractOne(n.street, list(nomes), scorer=fuzz.WRatio)
-        if best is None or best[1] < self._lo:
-            return None
-        name, score = best[0], float(best[1])
+        perto, longe = self._partition_by_proximity(rows, city_centro)
 
-        segmentos = [r for r in rows if r["name_norm"] == name]
+        escolha = self._best_name(n.street, perto)
+        pool, distante = perto, False
+        if escolha is None or escolha[1] < self._lo:
+            # Nada perto bateu o suficiente -- só agora os distantes contam,
+            # e só como último recurso (existe, mas não com confiança de
+            # posição). Sem isto, uma rua real só teria "cidade"/"bairro"
+            # como resposta, quando "existe, mas longe" é mais honesto.
+            escolha = self._best_name(n.street, longe)
+            pool, distante = longe, True
+            if escolha is None or escolha[1] < self._lo:
+                return None
+
+        name, score = escolha
+        segmentos = [r for r in pool if r["name_norm"] == name]
         # Âncora: bairro se o ERP informou e o índice conhece (já escopado
         # por cidade via `_place_scoped` — precisa ser resolvido ANTES de
         # virar âncora, senão um "CENTRO" de outro município arrasta a
@@ -241,7 +272,13 @@ class Geocoder:
         row = self._pick_segment(segmentos, ancora)
         pts = json.loads(row["coords_json"])
 
-        if score >= self._hi and n.street == name:
+        if distante:
+            # Existe, mas nenhum segmento está perto da cidade do endereço
+            # -- a mesma incerteza de "bairro"/"cidade", não de um match
+            # local. Nunca high/medium, senão volta a contar como acerto
+            # confiante um resultado que pode estar a centenas de km.
+            confidence, source = "low", "street_fuzzy"
+        elif score >= self._hi and n.street == name:
             confidence, source = "high", "street_exact"
         elif score >= self._hi:
             confidence, source = "medium", "street_fuzzy"
@@ -257,14 +294,43 @@ class Geocoder:
 
         lon, lat = self._point_on_street(con, pts, name, n, city_centro)
 
-        if city_centro is not None and \
+        if not distante and city_centro is not None and \
                 self._dist2((lon, lat), city_centro) > CITY_RADIUS_DEG ** 2:
-            # O nome bateu em algum lugar, mas nenhum segmento com esse nome
-            # está perto o bastante da cidade do endereço — não é um "match"
-            # utilizável. Deixa a cascata cair para bairro/cidade.
+            # Rede de segurança: com a partição acima isto não deveria mais
+            # disparar para o ramo "perto" (o segmento já veio filtrado),
+            # mas continua barato e continua certo de se manter.
             return None
 
         return GeoResult(lon, lat, confidence, source, name, score)
+
+    def _partition_by_proximity(self, rows: list[sqlite3.Row],
+                                city_centro: tuple[float, float] | None
+                                ) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+        """Separa os segmentos candidatos em perto/longe do centroide da
+        cidade ANTES de qualquer pontuação fuzzy -- é isto que faz a rua
+        certa perto vencer a rua errada só coincidentemente bem pontuada.
+        Sem cidade conhecida não há como separar; tudo vira "perto" (resta
+        só o score mesmo, como antes desta mudança)."""
+        if city_centro is None:
+            return rows, []
+        perto, longe = [], []
+        for r in rows:
+            centro = ((r["min_lon"] + r["max_lon"]) / 2,
+                      (r["min_lat"] + r["max_lat"]) / 2)
+            if self._dist2(centro, city_centro) <= CITY_RADIUS_DEG ** 2:
+                perto.append(r)
+            else:
+                longe.append(r)
+        return perto, longe
+
+    @staticmethod
+    def _best_name(street: str, rows: list[sqlite3.Row]
+                   ) -> tuple[str, float] | None:
+        if not rows:
+            return None
+        nomes = {r["name_norm"] for r in rows}
+        best = process.extractOne(street, list(nomes), scorer=fuzz.WRatio)
+        return (best[0], float(best[1])) if best is not None else None
 
     @staticmethod
     def _pick_segment(segmentos: list, ancora: tuple[float, float] | None):
