@@ -1,0 +1,22 @@
+# Fim de linha: LF no repositório e no diretório de trabalho.
+#
+# Sem isto, uma edição feita a partir do Windows reescreve o arquivo inteiro
+# em CRLF e o commit vira um diff de arquivo inteiro: uma onda de correções
+# deste projeto inflou de ~950 para 3.430 linhas assim, e revisar o que
+# mudou de verdade ficou impossível. Tudo aqui é lido por bash, docker e
+# python dentro de containers Linux -- LF é o único formato que serve.
+* text=auto eol=lf
+
+# Binários: nunca converter (o git normalmente detecta, mas estes são os
+# que aparecem neste repositório e não vale depender da heurística).
+*.fdb   binary
+*.FDB   binary
+*.pbf   binary
+*.osrm* binary
+*.db    binary
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
