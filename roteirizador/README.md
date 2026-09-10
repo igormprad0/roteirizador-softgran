@@ -94,10 +94,14 @@ diferentes).
    baseline de locação é aproximado (o ERP não registra ordem) — isso
    constrói credibilidade.
 4. **Entrega posterior, 09/12/2024** — o dia de pico, 215 paradas, para
-   mostrar que escala. Depois, no dia de 13/08/2026, **liderar com a KPI de
-   km**: 29,6% de economia (286,3 → 201,5 km) — aqui o argumento é
-   distância, porque a frota tem caminhões de carga fracionada (mais
-   capacidade por viagem), não capacidade 1.
+   mostrar que escala. **Aviso antes de clicar em otimizar:** este é o
+   passo mais pesado do roteiro e vem logo depois de outras chamadas de
+   `/api/optimize` no roteiro acima — em ambiente sob carga isso já levou
+   45-49s numa demo real (ver "Limitações conhecidas"); isolado, leva
+   12-13s. Se demorar, não é travamento — está processando. Depois, no dia
+   de 13/08/2026, **liderar com a KPI de km**: 29,6% de economia (286,3 →
+   201,5 km) — aqui o argumento é distância, porque a frota tem caminhões
+   de carga fracionada (mais capacidade por viagem), não capacidade 1.
 5. Abrir um romaneio PDF e o link do Google Maps.
 
 ## Limitações conhecidas
@@ -186,3 +190,16 @@ diferentes).
   Um clone novo (banco vazio) não tem esse problema; em caso de dúvida sobre
   se um número reflete o código atual, apagar as linhas com
   `is_manual = 0` de `geocode_cache` força recálculo.
+- **O dia de pico (215 paradas) tem tempo instável sob carga.** Isolado —
+  uma chamada única a `/api/optimize`, sem nada pesado antes na mesma
+  sessão — leva 12-13s, bem dentro do critério de 30s. Rodando logo depois
+  de outras chamadas pesadas de `/api/optimize` na mesma sessão (exatamente
+  o padrão do roteiro da demo acima: locação → otimizar → painel → dia de
+  pico), foi medido em 45-49s, duas vezes, no mesmo ambiente de
+  desenvolvimento (Docker Desktop/Windows). Numa segunda verificação
+  independente (revisor, máquina diferente), o mesmo padrão de chamadas
+  sequenciais não reproduziu a lentidão — 12-13s consistente. Isso aponta
+  para contenção de CPU específica do ambiente onde foi medido, não um
+  problema algorítmico do otimizador; mas como não foi possível confirmar a
+  causa com certeza, o roteiro da demo avisa antes do passo do dia de pico
+  em vez de prometer velocidade.
