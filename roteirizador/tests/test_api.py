@@ -341,3 +341,75 @@ def test_optimize_com_osrm_inacessivel_da_erro_limpo(monkeypatch):
 
     assert r.status_code == 502
     assert r.status_code != 500
+
+
+@pytest.mark.erp
+@pytest.mark.slow
+def test_optimize_chama_o_portao_de_viabilidade_e_marca_o_baseline(monkeypatch):
+    """`optimize` TEM de passar o baseline pelo portão de viabilidade.
+
+    `tests/test_viabilidade.py` prova `viagens_inviaveis` como função pura,
+    e o teste e2e re-deriva a viabilidade a partir de `baseline.trips` --
+    nenhum dos dois nota se a CHAMADA sumir de `service.optimize`. Apagar o
+    portão deixava a suíte inteira verde: o defeito de sempre neste
+    projeto, um número melhor sem teste vermelho.
+
+    Aqui a fonte é substituída por uma que supõe UMA volta contínua com
+    todas as paradas do dia -- exatamente o defeito histórico do dia de
+    pico (125 paradas de uma caixa de despacho roteadas como uma rota só) e
+    o único jeito de chegar num baseline inviável passando pelo caminho de
+    verdade, porque `baseline_order` hoje já quebra os grupos pela
+    capacidade. A fonte se declara NÃO aproximada, então o `approximate` do
+    payload só pode virar True por obra do portão.
+    """
+    client.put("/api/depot", json={"profile": "entrega_posterior", "depot": {
+        "label": "Matriz", "lon": -54.8060, "lat": -22.2210,
+        "address": "Rua Ponta Porã, 1343"}})
+    # frota deliberadamente pequena: 6 caçambas é menos do que as paradas
+    # que a volta contínua suposta pelo baseline levaria de uma vez
+    client.put("/api/fleet", json={"profile": "entrega_posterior", "fleet": [
+        {"id": "CAM1", "label": "Caminhão 1", "placa": "AEY2862",
+         "capacity": 6, "trips": 4, "shift_start_s": 25200,
+         "shift_end_s": 64800, "enabled": True, "erp_id_veiculo": 5}]})
+
+    from api.app import service
+    from api.app.erp.base import build_source as _build_real
+    from api.app.models import BaselineTrip
+
+    class _UmaVoltaSo:
+        """Fonte que devolve as paradas de verdade, mas supõe que todas
+        foram feitas numa única volta -- e jura que isso é o registro."""
+        baseline_approximate = False
+        baseline_note = ""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.profile = inner.profile
+
+        def fetch(self, *a, **kw):
+            return self._inner.fetch(*a, **kw)
+
+        def baseline_order(self, stops, vehicles):
+            return [BaselineTrip("Veículo 11",
+                                 [s.external_id for s in stops])]
+
+    monkeypatch.setattr(service, "build_source",
+                        lambda profile, conn: _UmaVoltaSo(
+                            _build_real(profile, conn)))
+
+    body = client.post("/api/optimize", json={"profile": "entrega_posterior",
+                                              "date": DIA_EP,
+                                              "mode": "replanejar"}).json()
+    base = body["baseline"]
+    carga = len(base["trips"][0]["stop_external_ids"])
+    assert carga > 6, f"a volta suposta tem {carga} paradas; não testa nada"
+
+    assert base["infeasible"], (
+        "o baseline supõe uma volta com mais paradas do que a maior "
+        "capacidade da frota e o portão não reclamou -- `optimize` não "
+        "está chamando `viagens_inviaveis`")
+    assert "capacidade" in base["infeasible"][0]
+    # e a ressalva chega até quem lê o número, não fica só no log
+    assert base["approximate"] is True
+    assert body["comparison"]["approximate"] is True
+    assert "NÃO executável" in body["comparison"]["note"]

@@ -251,3 +251,34 @@ def test_build_source_resolve_os_dois_perfis():
     with connect(Profile.ENTREGA_POSTERIOR) as c:
         assert build_source(Profile.ENTREGA_POSTERIOR, c).profile \
             is Profile.ENTREGA_POSTERIOR
+
+
+def test_baseline_order_salta_a_parada_que_nao_cabe_e_leva_a_proxima_que_cabe():
+    """O laço varre a fila PARA A FRENTE; não exige adjacência.
+
+    Este é o teste que faltava: o defeito ("+67% de cobertura") era o laço
+    encerrar a viagem no primeiro "não cabe" ADJACENTE, o que com
+    capacidade 1 travava o baseline em `nº de viagens + 1` paradas
+    independentemente dos dados -- o tamanho da frota disfarçado de
+    medição. Reintroduzir a adjacência não quebrava nenhum teste da suíte.
+
+    Cenário mínimo em que as duas versões divergem: E1 entra na viagem; E2
+    (a próxima da fila) NÃO cabe junto, porque exigiria duas caçambas a
+    bordo; P1 (mais adiante na fila) cabe, porque a coleta ocupa o espaço
+    que E1 liberou ao ser entregue. Um despachante com a caçamba a bordo
+    pula o pedido que não cabe e leva o próximo que cabe -- ninguém manda o
+    caminhão embora meio vazio porque a linha seguinte da lista não coube.
+    Com a adjacência de volta, a viagem sai só com E1.
+    """
+    stops = [_mini_stop("E1", "delivery", 0), _mini_stop("E2", "delivery", 1),
+             _mini_stop("P1", "pickup", 2)]
+    frota = [VehicleConfig(id="X", label="X", capacity=1, trips=1)]
+    trips = LocacaoSource(None).baseline_order(stops, expand_trips(frota, DEPOSITO))
+    assert len(trips) == 1
+    assert trips[0].stop_external_ids == ["E1", "P1"], (
+        "a viagem parou na primeira parada que não coube em vez de varrer a "
+        "fila para a frente")
+    # e a ordem de lançamento continua respeitada: nada foi reordenado, só saltado
+    assert trips[0].stop_external_ids == sorted(
+        trips[0].stop_external_ids,
+        key=lambda i: {s.external_id: s.erp_sequence for s in stops}[i])

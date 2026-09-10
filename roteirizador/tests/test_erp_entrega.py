@@ -155,3 +155,28 @@ def test_baseline_respeita_a_hora_registrada(src):
     for t in src.baseline_order(stops, []):
         seqs = [por_id[i].erp_sequence for i in t.stop_external_ids]
         assert seqs == sorted(seqs)
+
+
+def test_numero_do_cadastro_nao_gruda_no_endereco_de_entrega():
+    """O `numero` do CADASTRO não pode viajar junto de um logradouro que
+    veio do endereço de ENTREGA.
+
+    `_LINHA_BASE` é exatamente o caso real: `LOGRADOURO` = "RUA MATO
+    GROSSO, 1973" (o número já está no texto) e `CF_NUMERO` = "50" (o
+    número da "RUA JATOBA, 50", outro endereço). `normalize.py` dá
+    precedência a `addr.numero` sobre o número extraído do texto, então
+    colar o do cadastro em cima trocava a porta -- 18 de 18 paradas de
+    13/08 iam para o número errado, em silêncio, com a suíte verde.
+    """
+    entrega, = EntregaPosteriorSource(_ConnFake([_LINHA_BASE])).fetch(
+        ULTIMO, ImportMode.REPLANEJAR)
+    assert entrega.address.logradouro == "RUA MATO GROSSO, 1973"
+    assert entrega.address.numero is None, (
+        f"número {entrega.address.numero!r} veio do cadastro e vai "
+        f"sobrepor o 1973 que já está no logradouro de entrega")
+    # e o do cadastro continua valendo quando é ELE quem dá o logradouro
+    so_cadastro = dict(_LINHA_BASE, LOGRADOURO=None, CLIENTE_ENDERECO=None)
+    cadastrada, = EntregaPosteriorSource(_ConnFake([so_cadastro])).fetch(
+        ULTIMO, ImportMode.REPLANEJAR)
+    assert (cadastrada.address.logradouro, cadastrada.address.numero) == (
+        "RUA JATOBA", "50")
