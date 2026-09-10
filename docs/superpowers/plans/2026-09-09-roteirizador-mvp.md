@@ -1728,6 +1728,85 @@ def test_nao_usa_city_norm_do_way_para_filtrar(geo):
     _, r = geo.geocode(_a("RUA MATO GROSSO, 1973", cidade="DOURADOS"))
     assert r.confidence in ("high", "medium")
     assert r.source != "cidade"
+
+
+# ---- escopo de cidade em TODA consulta -------------------------------------
+# O fixture abaixo replica as colisões reais do índice: mesmo nome de rua,
+# mesmo número de porta e mesmo nome de bairro existindo em outro município.
+
+@pytest.fixture
+def geo_colisao(tmp_path):
+    idx = tmp_path / "streets.db"
+    c = sqlite3.connect(idx)
+    c.executescript("""
+      CREATE TABLE street (street_id INTEGER PRIMARY KEY, name TEXT, name_norm TEXT,
+        city_norm TEXT, coords_json TEXT, min_lon REAL, min_lat REAL,
+        max_lon REAL, max_lat REAL);
+      CREATE VIRTUAL TABLE street_fts USING fts5(name_norm, city_norm,
+        street_id UNINDEXED, tokenize='unicode61');
+      CREATE TABLE housenumber (street_norm TEXT, city_norm TEXT, number TEXT,
+        lon REAL, lat REAL);
+      CREATE TABLE place (kind TEXT, name_norm TEXT, city_norm TEXT, lon REAL, lat REAL);
+    """)
+    # Mesma rua em Dourados (-54.81/-22.22) e em Campo Grande (-54.61/-20.46).
+    c.execute("INSERT INTO street VALUES (1,'Rua Mato Grosso','RUA MATO GROSSO','',"
+              "'[[-54.8100,-22.2200],[-54.8000,-22.2200]]',-54.81,-22.22,-54.80,-22.22)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA MATO GROSSO','',1)")
+    c.execute("INSERT INTO street VALUES (2,'Rua Mato Grosso','RUA MATO GROSSO','',"
+              "'[[-54.6100,-20.4600],[-54.6000,-20.4600]]',-54.61,-20.46,-54.60,-20.46)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA MATO GROSSO','',2)")
+    # Rua numerada: todos os tokens são genéricos ou dígitos.
+    c.execute("INSERT INTO street VALUES (3,'Alameda 5','ALAMEDA 5','',"
+              "'[[-54.8300,-22.2400],[-54.8200,-22.2400]]',-54.83,-22.24,-54.82,-22.24)")
+    c.execute("INSERT INTO street_fts VALUES ('ALAMEDA 5','',3)")
+    # Mesmo número de porta nas duas cidades; só o de CG tem city_norm.
+    c.execute("INSERT INTO housenumber VALUES ('RUA MATO GROSSO','DOURADOS','1973',"
+              "-54.8055,-22.2205)")
+    c.execute("INSERT INTO housenumber VALUES ('RUA MATO GROSSO','CAMPO GRANDE','1973',"
+              "-54.6055,-20.4605)")
+    # CENTRO existe nas duas; o de CG vem primeiro na varredura.
+    c.execute("INSERT INTO place VALUES ('bairro','CENTRO','',-54.6133,-20.4614)")
+    c.execute("INSERT INTO place VALUES ('bairro','CENTRO','',-54.8112,-22.2279)")
+    c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
+    c.execute("INSERT INTO place VALUES ('cidade','CAMPO GRANDE','',-54.6133,-20.4614)")
+    c.commit(); c.close()
+    store = LocalStore(tmp_path / "local.db"); store.init_schema()
+    return Geocoder(idx, store)
+
+
+def test_numero_de_porta_de_outra_cidade_nao_e_usado(geo_colisao):
+    """O caso real: 'RUA MATO GROSSO, 1973' em Dourados resolvia a 145 km."""
+    _, r = geo_colisao.geocode(_a("RUA MATO GROSSO, 1973", cidade="DOURADOS"))
+    assert r.lat == pytest.approx(-22.2205, abs=0.02)
+    assert r.lon == pytest.approx(-54.8055, abs=0.02)
+
+
+def test_bairro_homonimo_de_outra_cidade_nao_e_usado(geo_colisao):
+    """CENTRO existe em 10 municípios do extrato real."""
+    _, r = geo_colisao.geocode(_a("RUA QUE NAO EXISTE", cidade="DOURADOS",
+                                  bairro="CENTRO"))
+    assert r.source == "bairro"
+    assert r.lat == pytest.approx(-22.2279, abs=0.02)
+
+
+def test_segmento_de_outra_cidade_nao_e_escolhido(geo_colisao):
+    _, r = geo_colisao.geocode(_a("RUA MATO GROSSO", cidade="DOURADOS"))
+    assert r.lat == pytest.approx(-22.22, abs=0.05)
+
+
+def test_rua_numerada_continua_encontravel(geo_colisao):
+    """RUA 6, ALAMEDA 1..9 e afins são convenção de loteamento brasileiro.
+    O filtro de palavras genéricas não pode torná-las inencontráveis."""
+    _, r = geo_colisao.geocode(_a("ALAMEDA 5", cidade="DOURADOS"))
+    assert r.source in ("street_exact", "street_fuzzy", "street_mid")
+    assert r.lat == pytest.approx(-22.24, abs=0.02)
+
+
+def test_candidato_longe_demais_da_cidade_e_recusado(geo_colisao):
+    """Sem nada plausível perto, cai no centroide da cidade — não vai buscar
+    a 200 km e devolver `medium` como se tivesse acertado."""
+    _, r = geo_colisao.geocode(_a("RUA MATO GROSSO, 1973", cidade="CAMPO GRANDE"))
+    assert r.lat == pytest.approx(-20.46, abs=0.05)
 ```
 
 - [ ] **Step 2: Rodar — deve falhar**
@@ -1755,6 +1834,23 @@ Três correções decorrem disso, e nenhuma é opcional:
 3. **Interpolação só quando há dado.** Havendo números na via, usar o **mais próximo** do procurado em vez de `number/MAX`. Não havendo, ir ao ponto médio **do segmento escolhido**, não da rua inteira.
 
 Nada disso conserta a esparsidade do OSM — conserta o comportamento diante dela. Uma parada com a rua certa e posição aproximada dentro dela ordena uma rota corretamente; uma parada a 5 km inverte a sequência.
+
+### O escopo de cidade vale para TODA consulta, não só para a escolha de segmento
+
+Primeira tentativa desta task aplicou o escopo geográfico só em `_pick_segment` e deixou as outras quatro consultas varrendo o extrato inteiro. O resultado mediu 97% e 89% — e era ilusório: contava como acerto endereços resolvidos em outro município. Medido de novo com verificação de plausibilidade geográfica, caiu para **53% e 33%**. Casos reais:
+
+- `"RUA MATO GROSSO, 1973"`, cidade DOURADOS → resolveu a **145 km** de Dourados
+- `"AV. PRESIDENTE VARGAS, 3095"`, cidade DOURADOS → número de porta encontrado em **Iguatemi, 160 km**
+- `bairro CENTRO` existe em **10 municípios** do extrato; `LIMIT 1` devolvia o de Campo Grande, 190 km fora
+
+Dois dados que mudam o desenho:
+
+- **`housenumber.city_norm` está 64% preenchido** (1.299 de 2.027) — diferente de `street.city_norm`, ele é utilizável e estava sendo ignorado.
+- **`place.city_norm` para bairro está preenchido em 1 de 1.388 linhas** — inútil, igual ao de street. Bairro precisa de desempate geométrico.
+
+Regra única, aplicada em todas as consultas: **nenhum candidato a mais de `CITY_RADIUS_DEG` do centroide da cidade é aceito**, e entre os que sobram vence o mais próximo. `0.30°` ≈ 33 km nesta latitude — cobre o município com folga e recusa a cidade vizinha. Onde `city_norm` existir e for utilizável (housenumber), usá-lo primeiro e cair no critério geométrico só como reserva.
+
+E o filtro `_TIPO_VIA` não pode ser tudo-ou-nada: ele torna **18 ruas reais de Dourados inencontráveis** — `RUA 6`, `RUA 8`, `ALAMEDA 1` a `ALAMEDA 9`, `RUA MARGINAL CD 01` (cujo único token distintivo, `MARGINAL`, está na própria lista). Nomes numerados são convenção corrente em loteamento brasileiro. Quando a filtragem esvaziar o conjunto de termos, usar os termos originais.
 
 ```python
 from __future__ import annotations
@@ -1944,7 +2040,9 @@ Expected: 15 passed
 
 - [ ] **Step 5: Medir a taxa real contra as duas bases**
 
-Os testes provam o comportamento; este passo mede se ele resolve o problema. Rodar sobre um dia real de cada cliente e registrar a distribuição de confiança — é o número do critério de sucesso nº 2 (≥ 70% em `high`+`medium`).
+Os testes provam o comportamento; este passo mede se ele resolve o problema. É o número do critério de sucesso nº 2 (≥ 70% em `high`+`medium`).
+
+**A medição conta apenas resultados geograficamente plausíveis.** A primeira versão desta task mediu 97% e 89% contando como acerto endereços resolvidos a 145 e 190 km da cidade certa. Um `medium` apontando para outro município não é acerto parcial — é a falha mais cara do sistema, porque parece certa e reordena a rota inteira. A caixa de Dourados abaixo (~30×25 km) é generosa de propósito: o que cair fora dela está errado, ponto.
 
 ```bash
 docker compose run --rm api python -c "
@@ -1959,22 +2057,39 @@ from collections import Counter
 
 store = LocalStore(Path('/srv/data/local.db')); store.init_schema()
 geo = Geocoder(Path('/srv/data/streets.db'), store)
+
+# Caixa generosa de Dourados, ~30x25 km. Fora dela o resultado está errado.
+LON0, LON1, LAT0, LAT1 = -55.05, -54.55, -22.45, -21.95
+def plausivel(g):
+    return LON0 <= g.lon <= LON1 and LAT0 <= g.lat <= LAT1
+
 for perfil, dia in [(Profile.LOCACAO, date(2026,8,4)),
                     (Profile.ENTREGA_POSTERIOR, date(2026,8,13))]:
     with connect(perfil) as c:
         paradas = build_source(perfil, c).fetch(dia, ImportMode.REPLANEJAR)
-    conf, src = Counter(), Counter()
+    conf, src, fora = Counter(), Counter(), []
+    bons = 0
     for s in paradas:
         _, g = geo.geocode(s.address)
-        conf[g.confidence] += 1; src[g.source] += 1
-    bons = conf['high'] + conf['medium']
-    print(perfil.value, len(paradas), 'paradas |', dict(conf), '|', dict(src),
-          '| high+medium =', f'{bons}/{len(paradas)}',
-          f'({bons/max(len(paradas),1):.0%})')
+        conf[g.confidence] += 1; src[f'{g.confidence}/{g.source}'] += 1
+        if g.confidence in ('high','medium'):
+            if plausivel(g):
+                bons += 1
+            else:
+                fora.append((s.address.raw, g.source, round(g.lon,4), round(g.lat,4)))
+    n = max(len(paradas), 1)
+    print(f'== {perfil.value}: {len(paradas)} paradas')
+    print('   confianca:', dict(conf))
+    print('   por fonte:', dict(src))
+    print(f'   BOM (high+medium E dentro da caixa) = {bons}/{len(paradas)} ({bons/n:.0%})')
+    if fora:
+        print(f'   !! {len(fora)} marcados bons mas FORA da caixa:')
+        for a in fora[:10]:
+            print('      ', a)
 "
 ```
 
-Reportar os números como saíram. Se ficar abaixo de 70%, **não relaxar o critério** — listar os endereços que caíram em `low`/`failed` e dizer o que neles derrotou a cascata. Esse diagnóstico vale mais que um número maquiado, porque decide se o próximo passo é melhorar `normalize.py`, o índice, ou a UI de correção manual.
+Reportar os números como saíram, incluindo a lista de fora-da-caixa. Se ficar abaixo de 70%, **não relaxar o critério nem alargar a caixa** — listar os endereços que falharam e dizer o que neles derrotou a cascata. Esse diagnóstico decide se o próximo passo é `normalize.py`, o índice, ou a UI de correção manual; um número maquiado manda na direção errada e só aparece na frente do cliente.
 
 - [ ] **Step 6: Commit**
 
