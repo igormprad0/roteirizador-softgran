@@ -1835,6 +1835,19 @@ Três correções decorrem disso, e nenhuma é opcional:
 
 Nada disso conserta a esparsidade do OSM — conserta o comportamento diante dela. Uma parada com a rua certa e posição aproximada dentro dela ordena uma rota corretamente; uma parada a 5 km inverte a sequência.
 
+### Proximidade entra ANTES do score, não depois
+
+Depois da regra do número: locação 86%, entrega posterior travada em 56%. As que restam falham todas pelo mesmo motivo estrutural — **o nome é escolhido por score difuso e só então a geografia é consultada**. Uma homônima distante com score coincidentemente maior vence, e a rua certa, ali em Dourados, nunca chega a ser avaliada:
+
+- `RUA VEREADOR AGUIAR FERREIRA DE SOUZA` existe em Dourados, **empata** no score com uma via distante e perde por ordenação arbitrária de conjunto
+- `SANTOS DUMONT` e `IPANEMA` perdem para homônimas distantes de score um pouco maior
+- `ALAMEDA DAS HORTENCIAS` é pior: o teto de 400 candidatos do FTS é consumido pela palavra `DAS`, e os segmentos corretos nem são recuperados
+
+Duas correções:
+
+1. **Particionar os candidatos por proximidade antes de pontuar.** Entre os que estão dentro do raio da cidade, vence o melhor score. Só se não houver nenhum perto é que os distantes são considerados — e aí a confiança cai. Isso resolve empate, resolve homônima e é o comportamento que o resto do módulo já pressupõe.
+2. **Não gastar o teto do FTS com conectivos.** `DAS`, `DOS`, `DE`, `DA`, `DO`, `E` não distinguem nada e enchem os 400 candidatos com ruído. Removê-los dos termos de busca — mantendo o fallback já existente para quando a filtragem esvaziar tudo.
+
 ### O número é separador, não terminador (medido, não suposto)
 
 Medição com cache limpo depois do escopo de cidade: **63% locação, 56% entrega**, zero apontando para cidade errada. Consultando o índice pelos endereços que falharam, quase todos **existem em Dourados**:
