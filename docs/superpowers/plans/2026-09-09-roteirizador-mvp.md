@@ -2118,15 +2118,17 @@ for perfil, dia in [(Profile.LOCACAO, date(2026,8,4)),
                     (Profile.ENTREGA_POSTERIOR, date(2026,8,13))]:
     with connect(perfil) as c:
         paradas = build_source(perfil, c).fetch(dia, ImportMode.REPLANEJAR)
-    conf, src, fora, ruins = Counter(), Counter(), [], []
+    conf, src, fora, ruins, indeterminados = Counter(), Counter(), [], [], []
     bons = 0
     for s in paradas:
         _, g = geo.geocode(s.address)
         conf[g.confidence] += 1; src[f'{g.confidence}/{g.source}'] += 1
         if g.confidence in ('high','medium'):
             ok = plausivel(g, s.address)
-            if ok is not False:                 # True ou indeterminado
+            if ok is True:                      # cidade desconhecida NAO conta
                 bons += 1
+            elif ok is None:
+                indeterminados.append(s.address.raw)
             else:
                 fora.append((s.address.raw, s.address.cidade, g.source,
                              round(g.lon,4), round(g.lat,4)))
@@ -2140,6 +2142,9 @@ for perfil, dia in [(Profile.LOCACAO, date(2026,8,4)),
     if fora:
         print(f'   !! {len(fora)} marcados bons mas LONGE da cidade informada:')
         for a in fora[:10]: print('      ', a)
+    if indeterminados:
+        print(f'   ?? {len(indeterminados)} com cidade fora do indice (nao contados):')
+        for a in indeterminados[:5]: print('      ', a)
     if ruins:
         print(f'   -- {len(ruins)} em low/failed:')
         for a in ruins[:15]: print('      ', a)
