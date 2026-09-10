@@ -3,14 +3,16 @@ services:
     image: ghcr.io/project-osrm/osrm-backend:v5.27.1
     command: osrm-routed --algorithm ch --max-table-size 10000 /data/regiao.osrm
     volumes: ["./data/osm:/data"]
-    ports: ["5000:5000"]
+    # Só o loopback: o grafo e o solver são detalhes internos -- a API
+    # fala com eles pelo nome do serviço, ninguém de fora precisa.
+    ports: ["127.0.0.1:5000:5000"]
 
   vroom:
     image: ghcr.io/vroom-project/vroom-docker:v1.14.0
     environment:
       VROOM_ROUTER: osrm
     volumes: ["./data/vroom:/conf", "./vroom/config.yml:/conf/config.yml"]
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     depends_on: [osrm]
 
   firebird:
@@ -20,7 +22,9 @@ services:
       FIREBIRD_USER: rotas
       FIREBIRD_PASSWORD: rotas
     volumes: ["./data/fdb:/db"]
-    ports: ["3051:3050"]
+    # NUNCA em 0.0.0.0: são duas cópias de banco de cliente real. Publicado
+    # em todas as interfaces, qualquer máquina da rede alcançava o Firebird.
+    ports: ["127.0.0.1:3051:3050"]
 
   api:
     build: {context: ., dockerfile: Dockerfile.api}
@@ -28,8 +32,12 @@ services:
       OSRM_URL: http://osrm:5000
       VROOM_URL: http://vroom:3000
       FDB_HOST: firebird
-      FB_USER: SYSDBA
-      FB_PASSWORD: masterkey
+      # A API só LÊ o ERP (ver db/firebird.py). Rodar como SYSDBA/masterkey
+      # dava a ela poder de escrita total sobre dois bancos de cliente por
+      # nada -- o usuário `rotas`, que este compose já criava e ninguém
+      # usava, basta.
+      FB_USER: rotas
+      FB_PASSWORD: rotas
       LOCAL_DB: /srv/data/local.db
       STREETS_DB: /srv/data/streets.db
       OSM_PBF: /srv/data/osm/regiao.osm.pbf
