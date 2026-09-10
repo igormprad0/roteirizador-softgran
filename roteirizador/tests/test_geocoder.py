@@ -199,6 +199,11 @@ def geo_colisao(tmp_path):
     # CENTRO existe nas duas; o de CG vem primeiro na varredura.
     c.execute("INSERT INTO place VALUES ('bairro','CENTRO','',-54.6133,-20.4614)")
     c.execute("INSERT INTO place VALUES ('bairro','CENTRO','',-54.8112,-22.2279)")
+    # AGUA BOA sem prefixo nas duas cidades -- prova que a tolerancia de
+    # prefixo (JARDIM/VILA/...) nao reabre a colisao que o raio de cidade
+    # ja fecha: o ERP manda "JARDIM AGUA BOA" e so a de Dourados deve valer.
+    c.execute("INSERT INTO place VALUES ('bairro','AGUA BOA','',-54.8150,-22.2800)")
+    c.execute("INSERT INTO place VALUES ('bairro','AGUA BOA','',-54.6300,-20.5000)")
     c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
     c.execute("INSERT INTO place VALUES ('cidade','CAMPO GRANDE','',-54.6133,-20.4614)")
     c.commit(); c.close()
@@ -239,3 +244,26 @@ def test_candidato_longe_demais_da_cidade_e_recusado(geo_colisao):
     a 200 km e devolver `medium` como se tivesse acertado."""
     _, r = geo_colisao.geocode(_a("RUA MATO GROSSO, 1973", cidade="CAMPO GRANDE"))
     assert r.lat == pytest.approx(-20.46, abs=0.05)
+
+
+# ---- tolerância de prefixo de bairro (fix round 2/5) -----------------------
+
+def test_bairro_tolera_prefixo_ausente(geo):
+    """ERP escreve 'JARDIM AGUA BOA'; o índice só tem 'AGUA BOA'. Prefixos
+    quase decorativos (JARDIM/VILA/PARQUE/CONJUNTO/RESIDENCIAL) não podem
+    impedir o casamento de bairro."""
+    _, r = geo.geocode(_a("RUA QUE NAO EXISTE EM LUGAR NENHUM",
+                          bairro="JARDIM AGUA BOA"))
+    assert r.source == "bairro"
+    assert (r.lon, r.lat) == pytest.approx((-54.8150, -22.2800))
+
+
+def test_bairro_tolera_prefixo_mas_ainda_respeita_raio_da_cidade(geo_colisao):
+    """A tolerância de prefixo não pode reabrir a colisão de cidade que o
+    raio geográfico já fecha: 'AGUA BOA' existe sem prefixo em Dourados E em
+    Campo Grande; o ERP manda 'JARDIM AGUA BOA' para Dourados e só a
+    instância de Dourados pode ser usada."""
+    _, r = geo_colisao.geocode(_a("RUA QUE NAO EXISTE", cidade="DOURADOS",
+                                  bairro="JARDIM AGUA BOA"))
+    assert r.source == "bairro"
+    assert (r.lon, r.lat) == pytest.approx((-54.8150, -22.2800))

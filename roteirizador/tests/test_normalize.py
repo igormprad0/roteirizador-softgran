@@ -140,3 +140,26 @@ def test_uf_do_campo_estruturado_tem_precedencia():
 def test_split_number_casos_adicionais_complemento_e_km(entrada, rua, numero, complemento):
     street, num, comp = split_number(entrada)
     assert (street, num, comp) == (rua, numero, complemento)
+
+
+# --- Fix round 2/5 do geocoder: abreviação colada ao nome por ponto, sem
+# espaço ("AV.MARCELINO", "R.JOAO", "ROD.BR-163"). Achado real: o índice
+# tem uma "RUA MARCELINO PIRES" genuína e distinta da avenida; sem expandir
+# "AV." aqui, "AV.MARCELINO PIRES" nunca vira "AVENIDA MARCELINO PIRES" e o
+# fuzzy score do geocoder escolhe a rua errada. Não altera nenhum dos casos
+# acima -- só cobre um formato que a implementação anterior não tratava.
+@pytest.mark.parametrize("entrada,esperado", [
+    ("AV.MARCELINO PIRES", "AVENIDA MARCELINO PIRES"),
+    ("R.JOAO ROSA GOES", "RUA JOAO ROSA GOES"),
+    ("ROD.BR-163", "RODOVIA BR-163"),
+    ("AL.HECTARES", "ALAMEDA HECTARES"),
+    ("MARCELINO PIRES", "MARCELINO PIRES"),  # sem ponto: nao deve mudar
+])
+def test_expand_abbreviations_abreviacao_colada_sem_espaco(entrada, esperado):
+    assert expand_abbreviations(entrada) == esperado
+
+
+def test_split_number_abreviacao_colada_sem_espaco():
+    street, num, _ = split_number("AV.MARCELINO PIRES, 5285")
+    assert street == "AVENIDA MARCELINO PIRES"
+    assert num == "5285"

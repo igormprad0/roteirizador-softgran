@@ -49,6 +49,11 @@ _NUMBER_MAX_GAP = 200
 # segmento.
 CITY_RADIUS_DEG = 0.30
 
+# Prefixos quase decorativos que ERP e OSM discordam em incluir ou não no
+# nome de um bairro ("JARDIM AGUA BOA" vs "AGUA BOA"). `_bairro_variantes`
+# tenta o nome com e sem cada um destes antes de desistir.
+_BAIRRO_PREFIXOS = ("JARDIM", "VILA", "PARQUE", "CONJUNTO", "RESIDENCIAL")
+
 
 class Geocoder:
     def __init__(self, index_db: Path, store: LocalStore,
@@ -108,10 +113,21 @@ class Geocoder:
         do centroide da cidade e fica com o mais próximo entre os que
         sobram. Necessário para bairro: mesmo nome existe em vários
         municípios do extrato (`CENTRO` em 10) e não há `city_norm`
-        utilizável para filtrar antes."""
+        utilizável para filtrar antes.
+
+        Para `kind == "bairro"`, também tolera prefixo ausente/a mais
+        (`JARDIM`, `VILA`, `PARQUE`, `CONJUNTO`, `RESIDENCIAL`) — ERP e OSM
+        discordam sobre isso o tempo todo (`JARDIM AGUA BOA` vs `AGUA BOA`).
+        O portão geográfico abaixo continua aplicado a QUALQUER variante que
+        bater, então uma coincidência de nome (com ou sem prefixo) em outro
+        município continua sendo recusada — a tolerância de nome não abre
+        uma segunda porta para a colisão de cidade que o resto desta função
+        já fecha."""
+        nomes = self._bairro_variantes(name_norm) if kind == "bairro" else [name_norm]
+        marks = ",".join("?" * len(nomes))
         rows = con.execute(
-            "SELECT lon, lat FROM place WHERE kind = ? AND name_norm = ?",
-            (kind, name_norm)).fetchall()
+            f"SELECT lon, lat FROM place WHERE kind = ? AND name_norm IN ({marks})",
+            (kind, *nomes)).fetchall()
         if not rows:
             return None
         if city_centro is None:
@@ -123,6 +139,23 @@ class Geocoder:
         if not candidatos:
             return None
         return min(candidatos, key=lambda p: self._dist2(p, city_centro))
+
+    @staticmethod
+    def _bairro_variantes(name_norm: str) -> list[str]:
+        """Gera as grafias plausíveis de um bairro sem inventar nomes: o que
+        veio do ERP, sem um prefixo que ele já tenha, e com cada prefixo
+        comum na frente quando ele não tem nenhum."""
+        variantes = [name_norm]
+        tinha_prefixo = False
+        for pfx in _BAIRRO_PREFIXOS:
+            if name_norm.startswith(pfx + " "):
+                tinha_prefixo = True
+                sem_prefixo = name_norm[len(pfx) + 1:]
+                if sem_prefixo:
+                    variantes.append(sem_prefixo)
+        if not tinha_prefixo:
+            variantes.extend(f"{pfx} {name_norm}" for pfx in _BAIRRO_PREFIXOS)
+        return variantes
 
     @staticmethod
     def _dist2(a: tuple[float, float], b: tuple[float, float]) -> float:

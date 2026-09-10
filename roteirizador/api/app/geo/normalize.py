@@ -68,8 +68,23 @@ def normalize_city(raw: str | None, default_city: str = "DOURADOS",
 
 def expand_abbreviations(s: str) -> str:
     parts = re.sub(r"\s+", " ", s).strip().split(" ")
-    if parts and parts[0].upper() in _ABBREV:
+    if not parts:
+        return " ".join(parts)
+    if parts[0].upper() in _ABBREV:
         parts[0] = _ABBREV[parts[0].upper()]
+    else:
+        # Abreviação colada ao nome por ponto, sem espaço: "AV.MARCELINO",
+        # "R.JOAO", "ROD.BR-163". O primeiro token inteiro ("AV.MARCELINO")
+        # nunca bate no dicionário, então sem isto a abreviação nunca
+        # expande -- achado real: "AV.MARCELINO PIRES" não expande para
+        # "AVENIDA MARCELINO PIRES", e existe uma "RUA MARCELINO PIRES"
+        # genuína e distinta no índice que vence por fuzzy score quando a
+        # avenida fica sem a palavra completa.
+        prefixo, ponto, resto = parts[0].partition(".")
+        chave = (prefixo + ".").upper()
+        if ponto and resto and chave in _ABBREV:
+            parts[0] = _ABBREV[chave]
+            parts.insert(1, resto)
     return " ".join(parts)
 
 
