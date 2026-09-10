@@ -2,8 +2,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/../data/osm"
 
-curl -fL -o centro-oeste.osm.pbf \
-  https://download.geofabrik.de/south-america/brazil/centro-oeste-latest.osm.pbf
+# Git Bash/MSYS reescreve argumentos que parecem ponto de montagem de drive
+# (ex.: "/d") para caminhos Windows (ex.: "D:/") antes de o Docker os ver,
+# quebrando "-w /d" e "-v $PWD:/d" abaixo. Sem efeito em bash nativo (Linux/Mac).
+export MSYS_NO_PATHCONV=1
+
+if [ -s centro-oeste.osm.pbf ]; then
+  echo "centro-oeste.osm.pbf já presente, pulando download."
+else
+  curl -fL -o centro-oeste.osm.pbf \
+    https://download.geofabrik.de/south-america/brazil/centro-oeste-latest.osm.pbf
+fi
 
 docker run --rm -v "$PWD:/d" -w /d stefda/osmium-tool \
   osmium extract --bbox -58.5,-24.5,-50.8,-17.0 \
