@@ -46,8 +46,14 @@ def test_google_maps_link_leva_as_paradas_como_waypoints_na_ordem(rota):
 
 
 def test_google_maps_link_de_rota_vazia_nao_explode():
+    """Sem paradas não pode haver `waypoints` -- nem vazio. Checar só que a
+    URL começa com https deixava a guarda `if route.steps:` sem cobertura:
+    removendo a guarda, o teste passava igual (o mutante sobrevive)."""
     url = google_maps_link(VehicleRoute("A#1", "A", "A", 1, []), DEPOT)
     assert url.startswith("https://")
+    q = parse_qs(urlparse(url).query)
+    assert "waypoints" not in q, q
+    assert q["origin"][0] == q["destination"][0] == "-22.221,-54.806"
 
 
 def test_waze_link_usa_lat_lon_e_navega_direto(rota):
@@ -81,6 +87,18 @@ def test_pdf_e_um_pdf_valido(rota):
     pdf = build_romaneio_pdf(rota, stops, DEPOT, "Locação", "2026-08-04")
     assert pdf[:5] == b"%PDF-"
     assert len(pdf) > 1000
+
+
+def test_pdf_leva_o_deep_link_de_navegacao_por_parada(rota):
+    """§6.3 e critério 5 do spec: o link de navegação existe para ser usado.
+    Ele era testado unitariamente e não era chamado de lugar nenhum --
+    função com teste e sem chamador. O romaneio é onde o motorista está."""
+    stops = [_stop("LOC:1"), _stop("LOC:2", "CLIENTE Y", kind="pickup")]
+    pdf = build_romaneio_pdf(rota, stops, DEPOT, "Locação", "2026-08-04")
+    achatado = pdf.replace(b"\n", b"").replace(b"\r", b"")
+    for step in rota.steps:
+        # a coordenada de CADA parada, não um link genérico no rodapé
+        assert waze_link(step).encode() in achatado, step.stop_external_id
 
 
 def test_pdf_de_rota_vazia_ainda_gera_documento():

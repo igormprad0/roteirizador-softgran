@@ -175,8 +175,14 @@ def get_run(run_id: int) -> dict:
 def _rebuild(run: dict) -> tuple[list[Stop], list[VehicleRoute], Depot]:
     stops = [Stop(external_id=s["external_id"], kind=s["kind"],
                   cliente_id=s["cliente_id"], cliente_nome=s["cliente_nome"],
-                  address=Address(s["address"], None, None, None, None, None,
-                                  s["address"]),
+                  # Remonta o endereço ESTRUTURADO (ver service.stop_payload):
+                  # colapsar tudo em `logradouro` deixava as colunas
+                  # `bairro` e `cidade` do CSV vazias em toda exportação.
+                  # `.get` porque execuções salvas antes desta versão não
+                  # têm os campos novos no payload_json.
+                  address=Address(s.get("logradouro") or s["address"],
+                                  None, s.get("bairro"), s.get("cidade"),
+                                  s.get("uf"), None, s["address"]),
                   doc=s["doc"], notes=s["notes"] or "")
              for s in run["stops"]]
     routes = [VehicleRoute(

@@ -12,7 +12,7 @@ from reportlab.platypus import (Paragraph, SimpleDocTemplate, Spacer, Table,
                                 TableStyle)
 
 from ..models import Depot, Stop, VehicleRoute
-from .maps_link import google_maps_link
+from .maps_link import google_maps_link, waze_link
 
 _TIPO = {"delivery": "Entrega", "pickup": "Coleta"}
 _FONTE = "DejaVuSans"
@@ -71,7 +71,7 @@ def build_romaneio_pdf(route: VehicleRoute, stops: list[Stop], depot: Depot,
         Spacer(1, 6 * mm),
     ]
 
-    dados = [["#", "Hora", "Tipo", "Doc", "Cliente", "Endereço", "Obs."]]
+    dados = [["#", "Hora", "Tipo", "Doc", "Cliente", "Endereço", "Obs.", "Ir"]]
     for s in sorted(route.steps, key=lambda x: x.seq):
         st = por_id.get(s.stop_external_id)
         a = st.address if st else None
@@ -84,10 +84,16 @@ def build_romaneio_pdf(route: VehicleRoute, stops: list[Stop], depot: Depot,
             Paragraph(st.cliente_nome if st else s.stop_external_id, celula),
             Paragraph(endereco, celula),
             Paragraph((st.notes if st else "") or "", celula),
+            # Deep link por PARADA: o motorista abre o romaneio no celular e
+            # toca na linha da parada em que está. O link da rota inteira no
+            # Google Maps (rodapé) serve para planejar; este serve para
+            # dirigir até a próxima.
+            Paragraph(f'<link href="{waze_link(s)}">Waze</link>', celula),
         ])
 
     tabela = Table(dados, repeatRows=1,
-                   colWidths=[8 * mm, 14 * mm, 16 * mm, 18 * mm, 45 * mm, 60 * mm, 25 * mm])
+                   colWidths=[7 * mm, 13 * mm, 15 * mm, 16 * mm, 40 * mm, 55 * mm,
+                              22 * mm, 12 * mm])
     tabela.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), _FONTE),
         ("FONTSIZE", (0, 0), (-1, -1), 8),

@@ -7,6 +7,12 @@ from .osrm import OsrmClient
 from .vroom import build_payload, expand_trips, parse_solution
 
 
+# Margem acrescentada ao `solver_timeout_s` para formar o timeout de LEITURA
+# HTTP da chamada ao VROOM. Não é tempo de solver (o VROOM devolve quando
+# devolve); é quanto tempo o cliente espera antes de desistir.
+_MARGEM_HTTP_S = 160
+
+
 class VroomError(RuntimeError):
     pass
 
@@ -26,7 +32,15 @@ class Optimizer:
         payload, job_ids, veh_ids = build_payload(stops, vehicles)
 
         try:
-            r = httpx.post(self._url, json=payload, timeout=self._timeout + 10)
+            # `solver_timeout_s` é nome herdado e enganoso: ele nunca
+            # limitou o solver, só a leitura HTTP. O dia de pico mediu 10,4 s
+            # só dentro do VROOM (12,9 s no total) e este ambiente já mostrou
+            # 45-49 s com chamadas empilhadas -- com a margem antiga (+10 s =
+            # 30 s) um pico de carga viraria HTTP 400 e um alert() na tela,
+            # exatamente quando o README promete "se estiver lento, não
+            # travou". Folga bem acima do pior caso observado.
+            r = httpx.post(self._url, json=payload,
+                           timeout=self._timeout + _MARGEM_HTTP_S)
         except httpx.HTTPError as exc:
             raise VroomError(f"falha ao chamar o VROOM: {exc}") from exc
         if r.status_code >= 400:

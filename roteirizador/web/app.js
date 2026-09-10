@@ -2,6 +2,16 @@ const CORES = ["#4d9de0","#3ddc84","#f5b942","#e8663d","#b06fdb","#3dd6c4",
                "#e05c8a","#8fd44a"];
 const $ = (id) => document.getElementById(id);
 
+// Todo texto que vem do ERP (nome de cliente, endereço, observação, label
+// de veículo) passa por aqui antes de entrar em innerHTML. É dado interno,
+// mas é texto que ninguém validou: um `"` no meio de um label já escapava
+// do atributo em `value="${v.label}"` e quebrava a linha da tabela de
+// frota, e uma tag no meio de um nome injetaria HTML na tela.
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g,
+    (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+
 const state = {stops: [], run: null, markers: new Map(), layers: [], pickupDropped: 0};
 
 const map = L.map("map").setView([-22.2210, -54.8060], 13);
@@ -58,9 +68,9 @@ function drawStops(stops) {
     const m = L.marker([s.lat, s.lon], {
       draggable: true, icon: pinIcon(CORDE[s.confidence], s.kind === "pickup" ? "↑" : "↓"),
     }).addTo(map);
-    m.bindPopup(`<b>${s.cliente_nome}</b><br>${s.address}<br>
+    m.bindPopup(`<b>${esc(s.cliente_nome)}</b><br>${esc(s.address)}<br>
       <small>${s.kind === "pickup" ? "Coleta" : "Entrega"} ·
-      ${s.confidence} (${s.source})${s.days_overdue ? ` · ${s.days_overdue}d atraso` : ""}
+      ${esc(s.confidence)} (${esc(s.source)})${s.days_overdue ? ` · ${s.days_overdue}d atraso` : ""}
       </small><br><small>arraste o pino para corrigir</small>`);
     m.on("dragend", async (e) => {
       const {lat, lng} = e.target.getLatLng();
@@ -100,8 +110,8 @@ function renderCounts() {
 function renderStops() {
   $("stops").innerHTML = state.stops.map((s) => `
     <li data-id="${s.external_id}">
-      <b><span class="dot ${s.confidence}"></span>${s.cliente_nome}</b>
-      <small>${s.kind === "pickup" ? "COLETA" : "ENTREGA"} · ${s.address || "sem endereço"}</small>
+      <b><span class="dot ${esc(s.confidence)}"></span>${esc(s.cliente_nome)}</b>
+      <small>${s.kind === "pickup" ? "COLETA" : "ENTREGA"} · ${esc(s.address || "sem endereço")}</small>
     </li>`).join("");
   $("stops").querySelectorAll("li").forEach((li) => li.onclick = () => {
     const m = state.markers.get(li.dataset.id);
@@ -146,7 +156,16 @@ function drawRoutes(run) {
     }
     r.steps.forEach((st) => {
       const m = state.markers.get(st.stop_external_id);
-      if (m) m.setIcon(pinIcon(cor, String(st.seq)));
+      if (!m) return;
+      m.setIcon(pinIcon(cor, String(st.seq)));
+      // Deep link de navegação por parada (§6.3 do spec), vindo pronto do
+      // servidor -- mesma função que o romaneio PDF usa, para não existirem
+      // duas versões da inversão lat/lon.
+      if (st.waze_url) {
+        m.setPopupContent(m.getPopup().getContent() +
+          `<br><a href="${esc(st.waze_url)}" target="_blank" rel="noopener">`
+          + `navegar até aqui (Waze)</a>`);
+      }
     });
   });
   const d = run.depot;
@@ -186,7 +205,7 @@ function renderPanel(run) {
   $("routes").innerHTML = run.routes.map((r, i) => `
     <div class="route-row">
       <span class="swatch" style="background:${CORES[i % CORES.length]}"></span>
-      <b>${r.label}</b>
+      <b>${esc(r.label)}</b>
       <span>${r.steps.length} paradas · ${r.distance_km} km · ${r.duration_min} min</span>
       <a href="/api/runs/${run.run_id}/romaneio.pdf?vehicle=${encodeURIComponent(r.vehicle_id)}"
          target="_blank">romaneio PDF</a>
@@ -198,7 +217,7 @@ function renderPanel(run) {
     unEl.classList.add("has-items");
     unEl.innerHTML = `⚠ <b>${run.unassigned.length} de ${t.stops_total} paradas não
       atendidas — não entraram em nenhuma rota:</b><br>` +
-      run.unassigned.map((u) => `${u.stop_external_id} (${u.reason})`).join("; ");
+      run.unassigned.map((u) => `${esc(u.stop_external_id)} (${esc(u.reason)})`).join("; ");
   } else {
     unEl.classList.remove("has-items");
     unEl.innerHTML = "";
@@ -219,7 +238,7 @@ $("btn-fleet").onclick = async () => {
   const dep = d.depot || d.suggested ||
     {label: "Depósito", lon: -54.8060, lat: -22.2210, address: ""};
   $("depot-box").innerHTML = `<p><b>Depósito:</b>
-    <input id="dep-label" value="${dep.label}">
+    <input id="dep-label" value="${esc(dep.label)}">
     <input id="dep-lon" type="number" step="0.0001" value="${dep.lon}">
     <input id="dep-lat" type="number" step="0.0001" value="${dep.lat}">
     ${d.depot ? "" : "<em>(sugerido pelo cadastro — confira)</em>"}</p>`;
@@ -236,8 +255,8 @@ $("btn-fleet").onclick = async () => {
   $("fleet-table").querySelector("tbody").innerHTML = linhas.map((v, i) => `
     <tr data-i="${i}">
       <td><input type="checkbox" class="f-on" ${v.enabled ? "checked" : ""}></td>
-      <td><input class="f-label" value="${v.label}"></td>
-      <td>${v.placa || ""}</td>
+      <td><input class="f-label" value="${esc(v.label)}"></td>
+      <td>${esc(v.placa || "")}</td>
       <td><input type="number" class="f-cap" min="1" value="${v.capacity}"></td>
       <td><input type="number" class="f-trips" min="1" max="20" value="${v.trips}"></td>
       <td><input type="time" class="f-ini" value="${hhmm(v.shift_start_s)}"></td>
@@ -270,5 +289,5 @@ $("fleet-save").onclick = async () => {
 (async () => {
   const ps = await api("/api/profiles");
   $("profile").innerHTML = ps.map((p) =>
-    `<option value="${p.profile}">${p.label}</option>`).join("");
+    `<option value="${esc(p.profile)}">${esc(p.label)}</option>`).join("");
 })();
