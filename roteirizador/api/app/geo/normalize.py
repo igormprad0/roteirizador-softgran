@@ -27,8 +27,10 @@ _UFS = {"MS", "MT", "GO", "SP", "PR", "DF", "RJ", "MG"}
 # "Q 13 LT 06" | "LOTE 06 QUADRA 09" | "QD37" | "LT05"
 _QUADRA = re.compile(
     r"\b(?:Q|QD|QUADRA)\s*\.?\s*\d+[A-Z]?\b|\b(?:L|LT|LOTE)\s*\.?\s*\d+[A-Z]?\b")
-# "CASA 2" | "APTO 4" | "BLOCO B" | "FUNDOS" -- unidade dentro do lote,
-# sempre complemento, nunca o numero da casa.
+# "CASA 2" | "APTO 4" | "BLOCO B" | "FUNDOS" -- unidade dentro do lote.
+# So e aplicado ao trecho da string a partir do primeiro digito (ver
+# split_number); antes disso essas palavras podem ser nome de rua de
+# verdade ("Rua Casa Forte", "Rua Bloco B").
 _UNIDADE = re.compile(r"\b(?:CASA|APTO|BLOCO|FUNDOS)\b\.?\s*[A-Z0-9]{0,3}\b")
 # "N/C" | "S/N" | "SN" no fim -> sem numero. A virgula antes e opcional: ERPs
 # escrevem tanto "RUA X, S/N" quanto "RUA X S/N" (ver test_split_number_
@@ -79,7 +81,18 @@ def _limpar(s: str) -> str:
 
 
 def split_number(s: str) -> tuple[str, str | None, str | None]:
-    """Devolve (rua, numero, complemento). Aceita texto cru; normaliza internamente."""
+    """Devolve (rua, numero, complemento). Aceita texto cru; normaliza internamente.
+
+    CASA/APTO/BLOCO/FUNDOS so contam como complemento quando aparecem DEPOIS
+    do primeiro digito da string -- nunca antes. Isso e o que distingue
+    "RUA A 100 CASA 2" (CASA e complemento, 100 e o numero) de "RUA CASA
+    FORTE 200" (CASA e parte do nome da rua -- existe de verdade em Recife;
+    o mesmo vale para "RUA BLOCO B" sem nenhum digito). Sem essa restricao de
+    posicao, qualquer rua cujo nome contenha uma dessas palavras teria o
+    nome corrompido (achado da revisao). Quadra/lote continuam podendo
+    aparecer antes OU depois do numero, pois o marcador ("Q13", "LT 06") e
+    inconfundivel e nao colide com nomes de rua.
+    """
     s = expand_abbreviations(strip_accents(s or "").upper())
 
     complement_parts: list[str] = []
@@ -88,15 +101,20 @@ def split_number(s: str) -> tuple[str, str | None, str | None]:
     if quadras:
         complement_parts.extend(q.strip() for q in quadras)
         s = _QUADRA.sub(" ", s)
-
-    unidades = _UNIDADE.findall(s)
-    if unidades:
-        complement_parts.extend(u.strip() for u in unidades)
-        s = _UNIDADE.sub(" ", s)
-
     s = _limpar(s)
+
     s = _SEM_NUMERO.sub("", s)
     s = _limpar(s)
+
+    primeiro_digito = re.search(r"\d", s)
+    corte = primeiro_digito.start() if primeiro_digito else len(s)
+    cabeca, resto = s[:corte], s[corte:]
+
+    unidades = _UNIDADE.findall(resto)
+    if unidades:
+        complement_parts.extend(u.strip() for u in unidades)
+        resto = _UNIDADE.sub(" ", resto)
+    s = _limpar(cabeca + resto)
 
     number = None
     m = _NUMERO.search(s)

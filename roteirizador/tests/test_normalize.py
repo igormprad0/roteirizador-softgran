@@ -128,6 +128,14 @@ def test_uf_do_campo_estruturado_tem_precedencia():
     ("RUA A, KM 5", "RUA A, KM 5", None, None),
     ("ROD BR-163, KM 12", "RODOVIA BR-163, KM 12", None, None),
     ("RUA MARILIA S/N", "RUA MARILIA", None, None),
+    # --- rodada 2 da revisao: CASA/APTO/BLOCO/FUNDOS so sao complemento
+    # quando aparecem depois do primeiro digito da string. Antes disso sao
+    # nome de rua de verdade -- "Rua Casa Forte" existe em Recife.
+    ("RUA CASA FORTE 200", "RUA CASA FORTE", "200", None),
+    ("RUA BLOCO B", "RUA BLOCO B", None, None),
+    ("RUA A 100 CASA", "RUA A", "100", "CASA"),
+    ("ROD BR-163 KM 12 CASA 3", "RODOVIA BR-163 KM 12", None, "CASA 3"),
+    ("RUA TARANTO Q 13 LT 06, 105 CASA 2", "RUA TARANTO", "105", "Q 13, LT 06, CASA 2"),
 ])
 def test_split_number_casos_adicionais_complemento_e_km(entrada, rua, numero, complemento):
     street, num, comp = split_number(entrada)
