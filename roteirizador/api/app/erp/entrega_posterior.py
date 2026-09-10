@@ -157,7 +157,9 @@ class EntregaPosteriorSource:
             motivos.append(
                 f"{sem_veiculo} de {len(stops)} paradas não têm caminhão "
                 f"registrado no ERP (caem em caixas de despacho como "
-                f"DV/RETIRA/BAIXA DV/CIF); a viagem delas foi reconstruída")
+                f"DV/RETIRA/BAIXA DV/CIF); a viagem delas foi reconstruída "
+                f"na ordem do campo HORA, que neste ERP é o horário de "
+                f"digitação e não o de despacho")
         if quebrados:
             motivos.append(
                 f"{quebrados} grupo(s) do ERP não caberiam em uma única "

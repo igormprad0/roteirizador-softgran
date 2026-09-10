@@ -20,23 +20,67 @@ sem depender de serviço externo. O ERP não tem nenhum campo de coordenada.
 
 ## Resultados medidos (dias reais das duas bases)
 
-| Perfil | O que otimizar realmente muda | Número medido |
-|---|---|---|
-| **Locação** (poliguindaste, capacidade 1) | **Cobertura** — quantas paradas a MESMA frota atende no dia | **25 otimizado vs. 15 na ordem de lançamento crua — +67%** |
-| **Entrega posterior** | **Distância** percorrida | **29,6% menos km** (286,3 → 201,5 km) |
+Medidos contra a API viva, com `local.db` recriado do zero (cache de
+geocodificação vazio) e a frota de `scripts/seed_demo.py`. Três execuções
+de cada dia deram o mesmo número.
 
-Cada perfil tem um argumento de venda diferente, e o número certo depende
-da física: com capacidade 1, a rota de locação já é quase determinada por
-ela (idas e vindas curtas ao depósito) — reordenar ganha pouco km (0,8%).
-O que a otimização ganha de verdade é CABER mais paradas na mesma frota —
-a ordem de lançamento crua, sem poder reordenar, só encaixa 15 das 25
-paradas que o otimizador atende. Entrega posterior tem caminhões com mais
-capacidade por viagem, então lá a distância evitada por uma rota melhor é
-o número que importa. Os dois números vêm estruturados em
-`comparison.optimized_stops`/`baseline_stops` (cobertura) e
-`comparison.percent_km_saved` (distância) — a UI mostra os dois, para os
-dois perfis, sempre lado a lado; ver "Limitações conhecidas" para a
-história completa por trás do 0,8%.
+| Perfil / dia | Paradas atendidas | Distância | Cobertura com a mesma frota | Baseline |
+|---|---|---|---|---|
+| **Locação** — 04/08/2026 | 25 de 38 | **19,0% menos km** (119,0 → 96,4) | 25 otimizado vs. 25 na ordem de lançamento | aproximado |
+| **Entrega posterior** — 13/08/2026 | 17 de 18 | **27,7% menos km** (278,6 → 201,5) | 17 vs. 17 | parcialmente reconstruído |
+| **Entrega posterior** — 09/12/2024 (pico) | 128 de 215 | **77,6% menos km** (401,5 → 89,8) | 128 vs. 128 | reconstruído — ver ressalva |
+
+**Os três baselines carregam `approximate = true`, e isso não é detalhe de
+rodapé: é a diferença entre um número e um número verificável.** A regra
+que este projeto adotou depois de sete defeitos que faziam o número
+melhorar sem quebrar teste nenhum é: *uma viagem de baseline que não
+poderia ter sido executada nunca pode ser reportada como real*. Antes de
+comparar, cada viagem suposta pelo baseline é conferida contra a maior
+capacidade e o maior turno da frota configurada
+(`service.viagens_inviaveis`); se alguma não passa, o comparativo sai
+marcado. Nos três dias acima nenhuma viagem é inviável — a ressalva vem de
+o baseline ser em parte RECONSTRUÍDO, não de ser impossível:
+
+- **Locação**: o ERP não registra veículo nem ordem de rota. O baseline
+  reproduz um despachante percorrendo a lista de lançamento e pegando o
+  próximo pedido que cabe no caminhão já carregado.
+- **Entrega posterior**: o ERP registra `ID_VEICULO`, mas metade daquela
+  tabela não é caminhão — é caixa de despacho (`DEVOLUÇÃO/DV`,
+  `PRÓPRIO/RETIRA`, `ENTREGA DUVIDOSA/BAIXA DV`, `DEP TRANSMITO/CIF`).
+  Em 13/08 são 4 das 17 paradas atendidas; **no dia de pico são 127 das
+  128**, quase todas sob `BAIXA DV`, que é baixa administrativa e não
+  rota. Para essas, a viagem é reconstruída na ordem do campo `HORA` — que
+  neste ERP é horário de digitação, não de despacho. **O 77,6% do dia de
+  pico é, portanto, indicativo: mede uma boa rota contra uma ordem de
+  digitação, não contra o que a operação de fato fez.** Os 27,7% de 13/08
+  são o número mais defensável dos três: ali a maior parte das paradas tem
+  caminhão registrado de verdade.
+
+Números que este README já anunciou e que **não sobreviveram à medição**,
+registrados aqui porque foi conferindo cada um deles que os defeitos
+apareceram: `+67% de cobertura` na locação (25 vs. 15) era artefato de uma
+regra que nenhum despachante segue — o baseline encerrava a viagem no
+primeiro pedido *adjacente* que não coubesse, sem olhar o resto da fila, o
+que com capacidade 1 prendia o número em `nº de viagens + 1` qualquer que
+fosse o dado. Corrigido, os dois lados cobrem as **mesmas 25 paradas**, e o
+ganho da locação aparece onde sempre esteve: em distância, 19,0%. E o
+`77,0%` do dia de pico vinha comparado contra uma volta contínua de 125
+paradas / 31,6 h de um caminhão que não existe, com `approximate = false`.
+
+`comparison` traz tudo estruturado: `percent_km_saved`,
+`baseline_stops`/`optimized_stops` (cobertura), `approximate` e `note`; o
+payload de `/api/optimize` traz ainda `baseline.trips` (cada viagem suposta,
+com km e horas medidos) e `baseline.infeasible`.
+
+### Sobre a "economia mensal"
+
+`comparison.monthly_brl_saved` extrapola **um único dia** por 22 dias úteis
+a **R$ 3,50/km** (`cost_per_km`, ajustável na chamada). Não é medição: é
+uma conta de guardanapo em cima de uma amostra de um dia, e o custo por km
+é um palpite razoável, não um dado do cliente. Nos dias acima dá R$
+1.738,66 (locação), R$ 5.938,24 (13/08) e R$ 23.994,89 (pico) por mês.
+Apresentar como ordem de grandeza — e, de preferência, pedir o custo/km
+real do cliente antes de mostrar.
 
 ## Subir do zero
 
@@ -48,15 +92,17 @@ docker compose run --rm api python -c "
 from pathlib import Path
 from api.app.geo.index_builder import build_street_index
 print(build_street_index(Path('/srv/data/osm/regiao.osm.pbf'), Path('/srv/data/streets.db')))"
+./scripts/grant_rotas.sh                   # SELECT (e só) para o usuário `rotas`
 docker compose run --rm api python scripts/seed_demo.py
 ```
 
-Abrir http://localhost:8000/app/
+O `grant_rotas.sh` precisa rodar depois de cada `copy_fdb.ps1`: os `.fdb`
+chegam do cliente sem privilégio nenhum para o usuário da aplicação, e é
+por isso que a API rodava como SYSDBA. Firebird, OSRM e VROOM escutam só em
+`127.0.0.1` — só a porta 8000 da aplicação fica exposta.
 
-**Pré-requisito da demo: internet.** O Leaflet é vendorizado e o app funciona
-offline, mas o mapa de fundo (tiles) vem de `tile.openstreetmap.org`. Sem
-conectividade os pinos e as rotas continuam desenhando normalmente, só que
-sobre um fundo escuro sem imagem de mapa.
+Abrir http://localhost:8000/app/ (ver "Limitações conhecidas" sobre a
+internet exigida pelos ladrilhos do mapa).
 
 ## Testes
 
@@ -65,8 +111,11 @@ docker compose run --rm api pytest -v                          # tudo
 docker compose run --rm api pytest -m "not erp and not stack"  # só unitários
 ```
 
-`tests/test_e2e.py` (marcado `erp`, `stack`, `slow`) roda os dois dias reais
-das duas bases contra a stack no ar — exige `docker compose up -d` com as
+`tests/test_e2e.py` (marcado `erp`, `stack`, `slow`) roda os três dias reais
+das duas bases contra a stack no ar, e verifica por conta própria que cada
+viagem suposta pelo baseline caberia na frota (capacidade e turno) -- sem
+consultar o veredito do próprio portão de viabilidade, porque um portão que
+só se autoconfirma não protege ninguém. Exige `docker compose up -d` com as
 bases copiadas, o índice de ruas construído e `scripts/seed_demo.py` já
 rodado. `tests/test_api.py` reconfigura a frota de locação repetidas vezes
 para seus próprios cenários de teste, mas roda contra um `local.db`
@@ -86,35 +135,59 @@ diferentes).
    configurada (2 caminhões, 14 viagens no total), a rota atende 25 das 38
    paradas do dia — as outras 13 não cabem na frota/janela do dia e aparecem
    destacadas, não escondidas.
-3. Painel **Hoje vs Otimizado**. **Liderar com a KPI "Paradas com a mesma
-   frota": 25 otimizado vs. 15 na ordem atual.** Essa é a venda para
-   locação — não o km. A física de capacidade 1 não deixa muita margem de
-   km (0,8%, e o painel mostra isso também, sem esconder); o que a mesma
-   frota ganha com otimização é caber 67% mais paradas no dia. Dizer que o
-   baseline de locação é aproximado (o ERP não registra ordem) — isso
-   constrói credibilidade.
-4. **Entrega posterior, 09/12/2024** — o dia de pico, 215 paradas, para
-   mostrar que escala. **Aviso antes de clicar em otimizar:** este é o
-   passo mais pesado do roteiro e vem logo depois de outras chamadas de
-   `/api/optimize` no roteiro acima — em ambiente sob carga isso já levou
-   45-49s numa demo real (ver "Limitações conhecidas"); isolado, leva
-   12-13s. Se demorar, não é travamento — está processando. Depois, no dia
-   de 13/08/2026, **liderar com a KPI de km**: 29,6% de economia (286,3 →
-   201,5 km) — aqui o argumento é distância, porque a frota tem caminhões
-   de carga fracionada (mais capacidade por viagem), não capacidade 1.
-5. Abrir um romaneio PDF e o link do Google Maps.
+3. Painel **Hoje vs Otimizado**: **19,0% menos km** (119,0 → 96,4) sobre as
+   mesmas 25 paradas, com a mesma frota dos dois lados. A KPI "Paradas com a
+   mesma frota" mostra 25 vs. 25 — um despacho razoável na ordem de
+   lançamento cobre o mesmo dia; o que a otimização economiza aqui é
+   distância, não cobertura. Dizer que o baseline é aproximado (o ERP não
+   registra veículo nem ordem para locação) — isso constrói credibilidade, e
+   a ressalva já aparece na tela sozinha.
+4. **Entrega posterior, 13/08/2026** — **liderar com a KPI de km: 27,7%**
+   (278,6 → 201,5), 17 das 18 paradas. É o número mais defensável do
+   conjunto: a maior parte das paradas do dia tem caminhão de verdade
+   registrado no ERP.
+5. **Dia de pico, 09/12/2024** — 215 paradas, para mostrar que escala.
+   **Aviso antes de clicar:** com o cache de geocodificação frio (primeira
+   vez que este dia roda numa instalação nova) leva ~45s; com o cache
+   quente, 12-13s. Se demorar, não travou. E **ao mostrar o 77,6%, ler a
+   ressalva junto**: 127 das 128 paradas atendidas estavam numa caixa de
+   despacho do ERP (`ENTREGA DUVIDOSA / BAIXA DV`), não num caminhão, então
+   o baseline desse dia é reconstruído a partir da ordem de digitação. É
+   um número indicativo de escala, não a economia daquele dia.
+6. Abrir um romaneio PDF (traz um link do Waze por parada e o link da rota
+   inteira no Google Maps) e baixar o CSV.
 
 ## Limitações conhecidas
 
-- **Geocodificação automática**: 92% em alta/média confiança no dia de
-  locação (04/08/2026, 35/38) e 78% no último dia de entrega posterior
-  (13/08/2026, 14/18) — ambos medidos com plausibilidade geográfica (nenhum
-  resultado fora da cidade informada pelo ERP), não por proximidade bruta.
-  Deduplicado a endereços distintos, a entrega posterior cai para 11/15 =
-  73%, apoiado majoritariamente em casamento aproximado (fuzzy), não exato —
-  passa a régua de 70% com margem estreita, e um dia diferente pode empurrar
-  para baixo dela. O restante entra na fila de revisão manual (arrastar o
-  pino no mapa).
+- **Geocodificação automática**, medida com plausibilidade geográfica
+  (o ponto tem de cair dentro do raio da cidade que o ERP informou para
+  aquela parada — não basta ter confiança alta) e com cache recriado do
+  zero:
+
+  | Dia | Alta/média plausível | Endereços distintos |
+  |---|---|---|
+  | Locação 04/08/2026 | 34/38 = **89%** | 31 |
+  | Entrega 13/08/2026 | 14/18 = **78%** | 15 |
+  | Pico 09/12/2024 | 188/215 = **87%** | 168 |
+
+  **Zero resultados de alta/média confiança apontando para fora da cidade
+  informada, nos três dias.** O dia de pico é a amostra que sustenta o
+  número: 168 endereços distintos, contra 15 e 31 dos dias da demo. O
+  restante entra na fila de revisão manual (arrastar o pino no mapa). O
+  que sobra em `low` é lacuna de dado real: rua ausente do extrato OSM,
+  propriedade rural sem nome de logradouro, condomínio não mapeado,
+  referência de quilômetro em rodovia.
+
+- **Todo baseline deste projeto é, em algum grau, reconstruído** — e é por
+  isso que os três dias saem com `approximate = true`. O ERP de locação não
+  registra veículo nem ordem; o de entrega posterior registra `ID_VEICULO`,
+  mas metade dos valores é caixa de despacho e não caminhão (ver
+  "Resultados medidos"). O portão de viabilidade
+  (`service.viagens_inviaveis`) roda para os dois perfis e recusa apresentar
+  como real qualquer viagem que estoure a maior capacidade ou o maior turno
+  da frota configurada. Nos dias medidos ele não dispara — o que dispara é
+  a marcação de reconstrução, que é mais fraca e mais honesta.
+
 - **Cobertura de frota — achado operacional, não defeito.** No dia de
   locação medido, a frota configurada (`scripts/seed_demo.py`: 2 caminhões
   poliguindaste, capacidade 1, 8 + 6 viagens = 14 viagens/dia) atende 25 das
@@ -122,84 +195,57 @@ diferentes).
   o dia real desse cliente excede o que essa frota consegue fazer. A
   ferramenta dizer "sua frota não cobre este dia" é um argumento de venda,
   não uma falha — e as paradas não atendidas aparecem destacadas na tela,
-  nunca escondidas.
-- **A economia medida no dia de locação é pequena: 0,8% (63,7 km → 63,1
-  km, restrito às 15 das 25 paradas atendidas que o baseline consegue
-  colocar em alguma viagem — ver próximo item).** Esse número tem uma
-  história de três correções, cada uma no sentido oposto da anterior, e
-  vale contar as três porque isso é evidência de que a medição está sendo
-  levada a sério, não só o número final:
-  - **81,8%** (bug original): o lado otimizado (23 paradas) era comparado
-    contra um baseline sobre as 38 paradas do dia inteiro — a "economia"
-    incluía trabalho que simplesmente não foi feito, não roteirização
-    melhor.
-  - **36,8%** (Task 13, primeira correção): restringiu os dois lados às
-    mesmas paradas atendidas, mas com uma frota de teste menor (1 caminhão,
-    capacidade 2, 6 viagens) — um placeholder, não a frota final; a própria
-    Task 13 registrou isso como pendência explícita para esta task.
-  - **0,6%** (esta task, primeira medição): com a frota final do seed (2
-    caminhões, capacidade 1), mas com o baseline ainda particionando em
-    blocos fixos de ~12 paradas, ignorando capacidade — fisicamente
-    impossível para uma poliguindaste (uma caçamba por vez). Isso forçava o
-    lado otimizado (que obedece capacidade, em idas e vindas curtas ao
-    depósito) contra um baseline que a ignora (encadeando paradas sem nunca
-    voltar) — o mesmo tipo de erro do 81,8%, só que no sentido inverso:
-    subestimava a economia em vez de inflá-la.
-  - **0,8%** (corrigido): o baseline agora respeita a MESMA frota e
-    capacidade que o otimizador usa (`erp/locacao.py::baseline_order`),
-    simulando a carga ao longo de cada viagem — uma entrega é pré-carregada
-    no depósito e libera espaço ao ser entregue, uma coleta ocupa esse
-    espaço ("sai cheio, volta cheio"), mas nunca mais de uma entrega a
-    bordo ao mesmo tempo. Como o baseline preserva a ordem de lançamento
-    estritamente (o otimizador pode reordenar; este baseline, por
-    definição, não pode), ele só consegue encaixar 15 das 25 paradas
-    atendidas nessa mesma frota de 14 viagens — o comparativo é restrito a
-    essas 15, dos dois lados, para não repetir o erro de medir quantidades
-    de trabalho diferentes.
-  A conclusão honesta: para uma operação de poliguindaste com capacidade 1,
-  a rota já é forçada, pela física, a ser uma sequência de idas e vindas
-  curtas — e isso deixa pouca margem de ganho em quilometragem sobre
-  qualquer ordem razoável. O valor real do otimizador aqui não é km: é
-  **cobertura** (25 das 38 paradas do dia com esta frota, contra só 15
-  numa despacho ingênuo que respeita a mesma ordem e capacidade) e janela de
-  atendimento — não incluído em `percent_km_saved`. No dia de entrega
-  posterior (13/08/2026) a economia é maior e mais representativa: 29,6%
-  (286,3 km → 201,5 km), com baseline real (veículo e hora do ERP, não
-  aproximado, sem essa restrição de cobertura).
-- **O baseline de locação é aproximado.** O ERP não registra veículo nem
-  ordem de rota para locação — o baseline reproduz um operador despachando
-  a lista de lançamento de cima para baixo para a próxima viagem
-  disponível da MESMA frota configurada, respeitando a capacidade de cada
-  viagem (ver item da economia acima). Isso é sinalizado na tela
-  (`comparison.approximate`) e no comparativo, nunca apresentado como se
-  fosse a rota real executada. O baseline de entrega posterior é real: vem
-  do veículo e horário gravados pelo ERP, por isso não tem essa
-  aproximação nem a restrição de cobertura.
+  nunca escondidas. Vale igual no dia de pico: 87 das 215 não cabem em 11
+  viagens.
+
+- **Histórico do número da locação**, que vale contar porque cada correção
+  foi no sentido oposto da anterior e nenhuma delas quebrou teste:
+  - **81,8%** — o lado otimizado (23 paradas) contra um baseline sobre as
+    38 do dia: "economia" que incluía trabalho não feito.
+  - **36,8%** — mesmos dois lados, mas com uma frota-placeholder menor.
+  - **0,6% / 0,8%** — frota real, mas baseline particionando em blocos
+    fixos de ~12 paradas, ignorando a capacidade 1 da poliguindaste: rota
+    otimizada que obedece física contra baseline que a ignora.
+  - **+67% de cobertura (25 vs. 15)** — o baseline passou a respeitar
+    capacidade, mas encerrava a viagem no primeiro pedido *adjacente* que
+    não coubesse. Com capacidade 1 isso fixava `baseline_stops` em
+    `nº de viagens + 1` (15) independentemente dos dados: o tamanho da
+    frota disfarçado de medição.
+  - **19,0% de km, cobertura 25 vs. 25** (atual) — o despachante ingênuo
+    pula o pedido que não cabe e leva o próximo que cabe, que é o que
+    qualquer operação faz. Mesma ordem de lançamento, mesmas 14 viagens,
+    mesma capacidade. Cobre o mesmo dia que o otimizador; roda 22,6 km a
+    mais para fazer isso.
+
 - Nada é gravado no Firebird do cliente. Escrever a rota de volta em
-  `ENTREGA_PCAB` é fase 2.
+  `ENTREGA_PCAB` é fase 2. A aplicação conecta como `rotas`, com `SELECT` e
+  nada mais (`scripts/grant_rotas.sh`), e o cliente Firebird recusa
+  qualquer SQL que não comece com `SELECT`/`WITH`.
 - Perfil de rota é `car`. Restrição de caminhão (altura/peso) exige trocar o
   OSRM por Valhalla.
 - **Nenhum navegador esteve disponível durante o desenvolvimento** — a UI
   foi verificada por conferência campo a campo da API e decodificação manual
   de uma polyline real, nunca por renderização de fato. O roteiro da demo
   acima é o primeiro teste real em navegador.
+- **Pré-requisito da demo: internet**, só para os ladrilhos do mapa
+  (`tile.openstreetmap.org`). O Leaflet é vendorizado; sem conectividade os
+  pinos e as rotas desenham normalmente sobre um fundo escuro sem imagem.
 - O cache de geocodificação é permanente por endereço (`geocode_cache`, em
   `local.db`) e nunca se invalida sozinho quando o algoritmo de
   geocodificação muda — um ambiente de desenvolvimento de longa duração pode
   acumular resultados calculados por uma versão mais antiga do normalizador.
   Um clone novo (banco vazio) não tem esse problema; em caso de dúvida sobre
   se um número reflete o código atual, apagar as linhas com
-  `is_manual = 0` de `geocode_cache` força recálculo.
-- **O dia de pico (215 paradas) tem tempo instável sob carga.** Isolado —
-  uma chamada única a `/api/optimize`, sem nada pesado antes na mesma
-  sessão — leva 12-13s, bem dentro do critério de 30s. Rodando logo depois
-  de outras chamadas pesadas de `/api/optimize` na mesma sessão (exatamente
-  o padrão do roteiro da demo acima: locação → otimizar → painel → dia de
-  pico), foi medido em 45-49s, duas vezes, no mesmo ambiente de
-  desenvolvimento (Docker Desktop/Windows). Numa segunda verificação
-  independente (revisor, máquina diferente), o mesmo padrão de chamadas
-  sequenciais não reproduziu a lentidão — 12-13s consistente. Isso aponta
-  para contenção de CPU específica do ambiente onde foi medido, não um
-  problema algorítmico do otimizador; mas como não foi possível confirmar a
-  causa com certeza, o roteiro da demo avisa antes do passo do dia de pico
-  em vez de prometer velocidade.
+  `is_manual = 0` de `geocode_cache` força recálculo. Todos os números deste
+  README foram medidos com o `local.db` recriado do zero.
+- **O dia de pico leva ~45s na primeira execução de uma instalação nova, e
+  12-13s depois disso.** A diferença é o cache de geocodificação: são 215
+  endereços resolvidos contra o índice de ruas na primeira vez, e leitura de
+  cache nas seguintes (medido: 44,3s a frio, 12,7s e 12,9s a quente, no
+  mesmo ambiente). Isto provavelmente explica os 45-49s "sob carga" que
+  versões anteriores deste README atribuíam a contenção de CPU — foi
+  observado justamente depois de o cache ter sido limpo, e um revisor numa
+  segunda máquina, com cache quente, nunca reproduziu. O critério de 30s do
+  `test_e2e.py` vale para o caminho com cache quente, que é o da demo; numa
+  instalação recém-criada, aquecer o cache rodando o dia de pico uma vez
+  antes de apresentar.
