@@ -4,7 +4,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 
 from ..db.local import LocalStore
 from ..models import Address, GeoResult
@@ -215,8 +215,15 @@ class Geocoder:
         if not terms:
             return []
         query = " OR ".join(terms)
+        # ORDER BY rank: sem isso, quais 400 linhas voltam para uma busca
+        # que bate em centenas ("SANTOS"/"SOUZA" sozinhos batem 656/904 no
+        # índice inteiro) depende da ordem incidental de armazenamento do
+        # SQLite -- não garantida estável entre processos. `rank` é o bm25
+        # embutido do FTS5: função pura do texto, mesma entrada sempre dá a
+        # mesma ordem, em qualquer processo.
         ids = [row["street_id"] for row in con.execute(
-            "SELECT street_id FROM street_fts WHERE street_fts MATCH ? LIMIT 400",
+            "SELECT street_id FROM street_fts WHERE street_fts MATCH ?"
+            " ORDER BY rank LIMIT 400",
             (query,))]
         if not ids:
             return []
@@ -326,11 +333,28 @@ class Geocoder:
     @staticmethod
     def _best_name(street: str, rows: list[sqlite3.Row]
                    ) -> tuple[str, float] | None:
+        """Pontua cada nome distinto e devolve o de maior score, com
+        desempate DETERMINÍSTICO em caso de empate exato.
+
+        `process.extractOne` sobre um `set` não serve: a ordem de iteração
+        de um `set` de strings varia com o hash aleatório do processo
+        (`PYTHONHASHSEED`), então dois scores empatados (achado real:
+        `"RUA PORTO BELO"` e `"RUA PORTO IGUAÇU"`, ambos 90,0, ambos perto
+        de Dourados) podiam escolher um ou outro dependendo só de qual
+        processo rodou a busca — o mesmo endereço geocodificando diferente
+        entre execuções. Aqui a lista é ordenada antes de pontuar (a ordem
+        de entrada nunca decide nada) e o desempate é por nome mais curto
+        — o casamento mais "justo" para o mesmo score, sem texto extra por
+        trás — e só como último critério, ordem alfabética (não é escolha
+        de mérito, é só o que garante uma única saída possível)."""
         if not rows:
             return None
-        nomes = {r["name_norm"] for r in rows}
-        best = process.extractOne(street, list(nomes), scorer=fuzz.WRatio)
-        return (best[0], float(best[1])) if best is not None else None
+        nomes = sorted({r["name_norm"] for r in rows})
+        pontuados = [(nome, float(fuzz.WRatio(street, nome))) for nome in nomes]
+        melhor_score = max(score for _, score in pontuados)
+        empatados = [nome for nome, score in pontuados if score == melhor_score]
+        escolhido = min(empatados, key=lambda nome: (len(nome), nome))
+        return escolhido, melhor_score
 
     @staticmethod
     def _pick_segment(segmentos: list, ancora: tuple[float, float] | None):

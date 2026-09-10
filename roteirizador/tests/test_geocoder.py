@@ -1,5 +1,8 @@
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import pytest
 
 from api.app.db.local import LocalStore
@@ -399,3 +402,68 @@ def test_conectivo_nao_esgota_o_limite_da_busca(geo_conectivo):
     assert r.source == "street_fuzzy"
     assert r.confidence in ("high", "medium")
     assert r.lat == pytest.approx(-22.213, abs=0.01)
+
+
+# ---- determinismo entre processos (fix round 5/5) --------------------------
+
+@pytest.fixture
+def streets_db_empate(tmp_path):
+    """Duas ruas que empatam EXATAMENTE em WRatio (90,0) para a mesma
+    consulta, as duas perto de Dourados -- reproduz sem depender do índice
+    real (que pode mudar) o empate que a revisão achou ao vivo:
+    'RUA PORTO BELO, ESQ. RUA PORTO IGUAÇU, Q16/L9' geocodificava para
+    'RUA PORTO BELO' ou 'RUA PORTO IGUAÇU' dependendo do processo."""
+    idx = tmp_path / "streets.db"
+    c = sqlite3.connect(idx)
+    c.executescript("""
+      CREATE TABLE street (street_id INTEGER PRIMARY KEY, name TEXT, name_norm TEXT,
+        city_norm TEXT, coords_json TEXT, min_lon REAL, min_lat REAL,
+        max_lon REAL, max_lat REAL);
+      CREATE VIRTUAL TABLE street_fts USING fts5(name_norm, city_norm,
+        street_id UNINDEXED, tokenize='unicode61');
+      CREATE TABLE housenumber (street_norm TEXT, city_norm TEXT, number TEXT,
+        lon REAL, lat REAL);
+      CREATE TABLE place (kind TEXT, name_norm TEXT, city_norm TEXT, lon REAL, lat REAL);
+    """)
+    c.execute("INSERT INTO street VALUES (1,'Rua Porto Belo','RUA PORTO BELO','',"
+              "'[[-54.80,-22.22],[-54.79,-22.22]]',-54.80,-22.22,-54.79,-22.22)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA PORTO BELO','',1)")
+    c.execute("INSERT INTO street VALUES (2,'Rua Porto Iguacu','RUA PORTO IGUACU','',"
+              "'[[-54.81,-22.23],[-54.80,-22.23]]',-54.81,-22.23,-54.80,-22.23)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA PORTO IGUACU','',2)")
+    c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
+    c.commit(); c.close()
+    return idx
+
+
+def test_geocode_e_deterministico_entre_processos(streets_db_empate, tmp_path):
+    """Um teste que geocodifica duas vezes NO MESMO processo não pega este
+    bug: a ordem de iteração de um `set` de nomes só varia com
+    PYTHONHASHSEED entre processos diferentes. Roda o mesmo geocode em
+    cinco interpretadores novos, cada um com uma seed de hash diferente, e
+    exige a mesma resposta nos cinco -- o mesmo endereço não pode
+    geocodificar diferente dependendo de qual processo rodou a busca."""
+    script = f"""
+import sys
+from pathlib import Path
+from api.app.db.local import LocalStore
+from api.app.geo.geocoder import Geocoder
+from api.app.models import Address
+
+store = LocalStore(Path(sys.argv[1])); store.init_schema()
+geo = Geocoder(Path({str(streets_db_empate)!r}), store)
+a = Address(logradouro='RUA PORTO BELO, ESQ. RUA PORTO IGUACU, Q16/L9',
+            numero=None, bairro=None, cidade='DOURADOS', uf='MS', cep=None, raw='x')
+_, g = geo.geocode(a)
+print(g.matched_text)
+"""
+    resultados = set()
+    for seed in ("0", "1", "2", "42", "12345"):
+        local_db = tmp_path / f"local_seed_{seed}.db"
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        out = subprocess.run(
+            [sys.executable, "-c", script, str(local_db)],
+            capture_output=True, text=True, env=env, check=True, timeout=60,
+        )
+        resultados.add(out.stdout.strip())
+    assert len(resultados) == 1, f"resultados diferentes entre seeds de hash: {resultados}"
