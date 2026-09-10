@@ -1835,6 +1835,32 @@ Três correções decorrem disso, e nenhuma é opcional:
 
 Nada disso conserta a esparsidade do OSM — conserta o comportamento diante dela. Uma parada com a rua certa e posição aproximada dentro dela ordena uma rota corretamente; uma parada a 5 km inverte a sequência.
 
+### O número é separador, não terminador (medido, não suposto)
+
+Medição com cache limpo depois do escopo de cidade: **63% locação, 56% entrega**, zero apontando para cidade errada. Consultando o índice pelos endereços que falharam, quase todos **existem em Dourados**:
+
+`RUA ONOFRE PEREIRA DE MATOS` · `AVENIDA CORONEL PONCIANO` · `RUA BARAO DO RIO BRANCO` · `RUA SANTOS DUMONT` · `ALAMEDA DAS HORTENCIAS` · `AVENIDA PRESIDENTE VARGAS` · `RUA AURORA AUGUSTA DE MATTOS` · `RUA ANTONIO EMILIO DE FIGUEIREDO` · `RUA IPANEMA` · `RUA PROJETADA`
+
+Só `ALAGOAS` e `VEREADOR AGUIAR DE SOUZA` estão de fato ausentes. Ou seja: **não é lacuna de cobertura do OSM, é falha de casamento.** O texto que sobra depois do número fica no nome da rua e afunda o score:
+
+| endereço cru do ERP | rua que o índice tem |
+|---|---|
+| `RUA ONOFRE PEREIRA DE MATOS,970 CENTRO, 970` | RUA ONOFRE PEREIRA DE MATOS |
+| `BARAO DO RIO BRANCO 395 JARDIM TROPICAL` | RUA BARAO DO RIO BRANCO |
+| `CORONEL PONCIANO 1425 NOVA DOURADOS` | AVENIDA CORONEL PONCIANO |
+| `SANTOS DUMONT MARMITARIA, 1361` | RUA SANTOS DUMONT |
+| `Aurora Augusta de Matos, 3600 (fundos Ecov` | RUA AURORA AUGUSTA DE MATTOS |
+| `Rua Antonio E. de Figueiredo, 2280 Esq. Ca` | RUA ANTONIO EMILIO DE FIGUEIREDO |
+| `RUA PROJETADA A, 285
+C VALDEREZ OLIVEIRA` | RUA PROJETADA |
+| `AV: PRESIDENTE VARGAS, LT1 Q 18(4948)` | AVENIDA PRESIDENTE VARGAS |
+| `ALAMENDA DAS HORTENCIAS 225, 225` | ALAMEDA DAS HORTENCIAS |
+
+Regra em `split_number`: **o primeiro número isolado encerra o nome da rua.** Tudo depois dele é complemento, nunca nome. Junto com isso: normalizar `
+`/`	` para espaço, tratar `AV:` como `AV.`, e descartar trecho entre parênteses no fim.
+
+Os 49 testes de `test_normalize.py` continuam valendo sem alteração — a regra vale a partir do primeiro número, e casos como `RUA 13 DE MAIO 500` ou `25 DE MARCO 100` já provam que dígito dentro do nome não pode disparar o corte sozinho.
+
 ### O escopo de cidade vale para TODA consulta, não só para a escolha de segmento
 
 Primeira tentativa desta task aplicou o escopo geográfico só em `_pick_segment` e deixou as outras quatro consultas varrendo o extrato inteiro. O resultado mediu 97% e 89% — e era ilusório: contava como acerto endereços resolvidos em outro município. Medido de novo com verificação de plausibilidade geográfica, caiu para **53% e 33%**. Casos reais:
