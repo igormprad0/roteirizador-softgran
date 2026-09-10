@@ -183,15 +183,14 @@ def test_baseline_respeita_capacidade_da_viagem(src):
     por_id = {s.external_id: s for s in stops}
 
     # Neste dia (2026-08-04) a ordem de lançamento é [26 entregas][12
-    # coletas] (ver `fetch`: entregas vêm todas antes de coletas) e a frota
-    # tem só 14 viagens -- todas se esgotam ainda dentro do bloco de
-    # entregas, nunca alcançando o bloco de coletas, então NENHUMA viagem
-    # deste teste combina entrega+coleta. Isso não é um bug: é a ordem real
-    # de lançamento do ERP sendo respeitada como pedido, e é justamente por
-    # isso que a prova de que "entrega seguida de coleta CABE" precisa de
-    # dado sintético determinístico -- ver
-    # `test_cabe_permite_entrega_seguida_de_coleta_mas_nao_o_contrario`
-    # abaixo, que não depende de qual endereço caiu em que posição.
+    # coletas] (ver `fetch`: entregas vêm todas antes de coletas). Como o
+    # despachante varre a fila PARA A FRENTE (pula o que não cabe no
+    # caminhão já carregado e leva o próximo que cabe), uma viagem de
+    # capacidade 1 pega uma entrega e alcança uma coleta lá adiante --
+    # "sai cheio, volta cheio", que é o que a operação real faz. A prova
+    # isolada dessa física, sem depender de qual endereço caiu em que
+    # posição, está em `tests/test_viabilidade.py::
+    # test_cabe_e_a_mesma_fisica_nos_dois_perfis`.
     assert trips, "frota realista deveria produzir pelo menos uma viagem"
     for t in trips:
         viagem = [por_id[i] for i in t.stop_external_ids]
