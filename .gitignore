@@ -1,0 +1,17 @@
+# Bases dos clientes — nunca versionar (4,8 GB e dados de cliente)
+*.FDB
+*.fdb
+
+# Fonte do ERP fornecido como referência, versionado em outro lugar
+fonte empresarial/
+
+# Artefatos do roteirizador
+roteirizador/data/
+roteirizador/web/vendor/
+
+# Workspace do subagent-driven-development
+.superpowers/
+
+__pycache__/
+*.pyc
+.pytest_cache/
