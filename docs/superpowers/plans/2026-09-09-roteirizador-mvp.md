@@ -2058,34 +2058,52 @@ from collections import Counter
 store = LocalStore(Path('/srv/data/local.db')); store.init_schema()
 geo = Geocoder(Path('/srv/data/streets.db'), store)
 
-# Caixa generosa de Dourados, ~30x25 km. Fora dela o resultado está errado.
-LON0, LON1, LAT0, LAT1 = -55.05, -54.55, -22.45, -21.95
-def plausivel(g):
-    return LON0 <= g.lon <= LON1 and LAT0 <= g.lat <= LAT1
+# Plausível = caiu perto do centroide da cidade que o ERP informou para AQUELA
+# parada. Uma caixa fixa em Dourados contaria como erro uma entrega correta em
+# Itaporã ou Maracaju — e os dois clientes atendem essas cidades de verdade.
+import sqlite3
+from api.app.geo.normalize import normalize_address
+_idx = sqlite3.connect('/srv/data/streets.db'); _idx.row_factory = sqlite3.Row
+def centro_da_cidade(nome):
+    r = _idx.execute("SELECT lon, lat FROM place WHERE kind='cidade'"
+                     " AND name_norm=? LIMIT 1", (nome,)).fetchone()
+    return (r['lon'], r['lat']) if r else None
+
+def plausivel(g, addr, raio_graus=0.30):
+    alvo = centro_da_cidade(normalize_address(addr).city)
+    if alvo is None:
+        return None            # cidade desconhecida no índice: não julgar
+    return (g.lon - alvo[0]) ** 2 + (g.lat - alvo[1]) ** 2 <= raio_graus ** 2
 
 for perfil, dia in [(Profile.LOCACAO, date(2026,8,4)),
                     (Profile.ENTREGA_POSTERIOR, date(2026,8,13))]:
     with connect(perfil) as c:
         paradas = build_source(perfil, c).fetch(dia, ImportMode.REPLANEJAR)
-    conf, src, fora = Counter(), Counter(), []
+    conf, src, fora, ruins = Counter(), Counter(), [], []
     bons = 0
     for s in paradas:
         _, g = geo.geocode(s.address)
         conf[g.confidence] += 1; src[f'{g.confidence}/{g.source}'] += 1
         if g.confidence in ('high','medium'):
-            if plausivel(g):
+            ok = plausivel(g, s.address)
+            if ok is not False:                 # True ou indeterminado
                 bons += 1
             else:
-                fora.append((s.address.raw, g.source, round(g.lon,4), round(g.lat,4)))
+                fora.append((s.address.raw, s.address.cidade, g.source,
+                             round(g.lon,4), round(g.lat,4)))
+        else:
+            ruins.append((s.address.raw, s.address.bairro, g.confidence, g.source))
     n = max(len(paradas), 1)
     print(f'== {perfil.value}: {len(paradas)} paradas')
     print('   confianca:', dict(conf))
     print('   por fonte:', dict(src))
-    print(f'   BOM (high+medium E dentro da caixa) = {bons}/{len(paradas)} ({bons/n:.0%})')
+    print(f'   BOM (high+medium E perto da cidade certa) = {bons}/{len(paradas)} ({bons/n:.0%})')
     if fora:
-        print(f'   !! {len(fora)} marcados bons mas FORA da caixa:')
-        for a in fora[:10]:
-            print('      ', a)
+        print(f'   !! {len(fora)} marcados bons mas LONGE da cidade informada:')
+        for a in fora[:10]: print('      ', a)
+    if ruins:
+        print(f'   -- {len(ruins)} em low/failed:')
+        for a in ruins[:15]: print('      ', a)
 "
 ```
 
