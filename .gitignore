@@ -7,7 +7,9 @@ fonte empresarial/
 
 # Artefatos do roteirizador
 roteirizador/data/
-roteirizador/web/vendor/
+# web/vendor/ NAO entra aqui: o Leaflet e vendorizado de proposito para a demo
+# rodar sem internet e para `docker compose up` funcionar num clone limpo.
+# Sao ~150 KB e sao parte do produto, nao artefato de build.
 
 # Fixture .pbf gerada por tests/fixtures/make_mini_pbf.py — não versionar binário
 roteirizador/tests/fixtures/mini.osm
