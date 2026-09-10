@@ -142,6 +142,9 @@ class BaselineTrip:
     # viagem caberia num turno?" sem roteirizar tudo de novo.
     distance_m: int = 0
     duration_s: int = 0
+    # Contra qual ordenação ESTA viagem foi medida: "registrada" ou
+    # "vizinho_mais_proximo", a que saiu mais curta (ver `measure_baseline`).
+    method: str = "registrada"
 
 
 @dataclass
@@ -152,6 +155,8 @@ class BaselineResult:
     vehicles_used: int
     approximate: bool                # True para locação (§5.4 do spec)
     note: str = ""
+    # Ordenação que responde pela maior parte da quilometragem do baseline.
+    method: str = "registrada"
 
 
 @dataclass
@@ -173,3 +178,9 @@ class Comparison:
     # que preserva a ordem de lançamento sem poder reordenar.
     baseline_stops: int = 0
     optimized_stops: int = 0
+    # Contra QUAL ordenação do mesmo conjunto de viagens a economia foi
+    # medida. A ordem registrada pelo ERP não carrega informação espacial
+    # (mede igual a embaralhar as paradas), então o baseline mede as duas e
+    # fica com a mais curta por viagem; este campo diz qual dominou, para a
+    # tela e o README não venderem economia contra um sorteio.
+    baseline_method: str = "registrada"

@@ -189,8 +189,16 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
         aproximado = source.baseline_approximate
         note = source.baseline_note
     osrm = OsrmClient(get_settings().osrm_url)
+    # `capacidade` liga a ordenação alternativa por vizinho mais próximo
+    # dentro de cada viagem (ver `measure_baseline`): a ordem registrada
+    # pelo ERP mede o mesmo que embaralhar as paradas, e economia medida
+    # contra um sorteio não é economia. A composição das viagens não muda;
+    # a capacidade é a mesma referência que o portão de viabilidade usa (a
+    # maior da frota), para nenhuma das duas ordens supor um caminhão que
+    # não existe.
     base = measure_baseline(trips, atendidas, osrm, depot,
-                            approximate=aproximado, note=note)
+                            approximate=aproximado, note=note,
+                            capacidade=max(v.capacity for v in fleet))
 
     # Portão de viabilidade: vale para todo perfil e roda DEPOIS da medição,
     # porque só aí cada viagem tem duração. Ver `viagens_inviaveis`.
@@ -275,7 +283,8 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
             "trips": [{"label": t.label,
                        "stop_external_ids": list(t.stop_external_ids),
                        "distance_km": round(t.distance_m / 1000, 1),
-                       "duration_h": round(t.duration_s / 3600, 2)}
+                       "duration_h": round(t.duration_s / 3600, 2),
+                       "method": t.method}
                       for t in trips],
         },
         "routes": [route_payload(r) for r in solution.routes if r.steps],

@@ -185,12 +185,20 @@ function renderPanel(run) {
   // quase determinada pela física, então o km quase não muda -- o ganho
   // real é aqui: quantas paradas a mesma frota consegue cobrir no dia.
   const maisCobertura = c.optimized_stops > c.baseline_stops;
+  // Contra qual ordenação o "Rota atual" foi medido. A ordem registrada no
+  // ERP não carrega informação espacial nenhuma (mede o mesmo que
+  // embaralhar as paradas), então o baseline mede também o despacho por
+  // vizinho mais próximo e fica com o menor -- quem lê a economia precisa
+  // saber contra o que ela foi medida.
+  const ordemBase = c.baseline_method === "vizinho_mais_proximo"
+    ? "vizinho mais próximo" : "ordem registrada";
   $("kpis").innerHTML = `
     <div class="kpi ${faltam ? "warn" : "good"}"><span>Paradas atendidas</span>
       <strong>${t.stops_served} / ${t.stops_total}</strong></div>
     <div class="kpi ${maisCobertura ? "good" : ""}"><span>Paradas com a mesma frota</span>
       <strong>${c.optimized_stops} otimizado vs ${c.baseline_stops} ordem atual</strong></div>
-    <div class="kpi"><span>Rota atual</span><strong>${c.baseline_km} km</strong></div>
+    <div class="kpi"><span>Rota atual (${ordemBase})</span>
+      <strong>${c.baseline_km} km</strong></div>
     <div class="kpi"><span>Rota otimizada</span><strong>${c.optimized_km} km</strong></div>
     <div class="kpi ${bom ? "good" : ""}"><span>Economia</span>
       <strong>${c.km_saved} km (${c.percent_km_saved}%)</strong></div>

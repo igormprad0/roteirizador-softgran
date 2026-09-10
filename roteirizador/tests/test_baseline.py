@@ -89,3 +89,104 @@ def test_compare_propaga_a_ressalva_do_baseline():
     base = measure_baseline([], [], FakeOsrm(), DEPOT, approximate=True, note="aprox")
     c = compare(sol, base)
     assert c.approximate is True and c.note == "aprox"
+
+
+# --------------------------------------------------------------------------
+# A ordem do baseline: registrada x vizinho mais próximo
+#
+# A ordem que o ERP registra não carrega informação espacial nenhuma -- 10
+# embaralhamentos aleatórios das paradas de cada dia medem o mesmo que ela
+# (pico 401,5 km contra 407,4 de média aleatória; 13/08 278,6 contra 283,3;
+# locação 119,0 contra 121,8). Um despachante de verdade dirige para a
+# parada mais próxima; economia medida só contra um sorteio não é economia.
+class GeoOsrm:
+    """Distância euclidiana no plano lon/lat, para a ordem importar."""
+    def __init__(self):
+        self.chamadas = []
+
+    def route(self, coords):
+        from api.app.routing.osrm import RouteGeometry
+        self.chamadas.append(list(coords))
+        d = sum(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+                for a, b in zip(coords, coords[1:]))
+        return RouteGeometry("xx", int(round(d * 100000)), int(round(d * 1000)))
+
+
+def _stop_em(sid, lon, lat, kind="delivery"):
+    a = Address("RUA X", None, None, "DOURADOS", "MS", None, "RUA X")
+    s = Stop(external_id=sid, kind=kind, cliente_id=1, cliente_nome="C",
+             address=a, service_seconds=0)
+    s.geo = GeoResult(lon, lat, "high", "street_exact")
+    return s
+
+
+def _tres_em_linha():
+    """Depósito na origem; a ordem registrada vai ao mais distante primeiro."""
+    return [_stop_em("a", -54.7, -22.0), _stop_em("b", -54.9, -22.0),
+            _stop_em("c", -54.8, -22.0)]
+
+
+DEPOT0 = Depot("Matriz", -55.0, -22.0)
+
+
+def test_baseline_fica_com_a_ordem_mais_curta_das_duas():
+    stops = _tres_em_linha()
+    trip = BaselineTrip("V1", ["a", "b", "c"])
+    osrm = GeoOsrm()
+    r = measure_baseline([trip], stops, osrm, DEPOT0, capacidade=3)
+
+    # registrada: 0,3 + 0,2 + 0,1 + 0,2 = 0,8 -- vizinho: 0,1+0,1+0,1+0,3 = 0,6
+    assert r.total_distance_m == 60000
+    assert trip.method == "vizinho_mais_proximo"
+    assert r.method == "vizinho_mais_proximo"
+    # a viagem PASSA A SER a ordem medida: quem lê stop_external_ids (payload,
+    # teste de viabilidade do e2e) vê a mesma sequência que foi cronometrada
+    assert trip.stop_external_ids == ["b", "c", "a"]
+    # uma chamada `route` extra por viagem, e NENHUMA matriz
+    assert len(osrm.chamadas) == 2
+    assert not hasattr(osrm, "table_chamada")
+
+
+def test_baseline_mantem_a_ordem_registrada_quando_ela_e_melhor():
+    stops = _tres_em_linha()
+    trip = BaselineTrip("V1", ["b", "c", "a"])          # já é a do vizinho
+    r = measure_baseline([trip], stops, GeoOsrm(), DEPOT0, capacidade=3)
+    assert trip.method == "registrada"
+    assert r.method == "registrada"
+    assert trip.stop_external_ids == ["b", "c", "a"]
+
+
+def test_sem_capacidade_o_baseline_nao_reordena_nada():
+    """O lado OTIMIZADO também é medido por esta função (a sequência que o
+    VROOM decidiu). Reordenar lá seria medir uma rota que o otimizador não
+    produziu -- por isso a alternativa só existe quando a capacidade é
+    informada, que é o único lugar onde ela faz sentido: o baseline."""
+    stops = _tres_em_linha()
+    trip = BaselineTrip("V1", ["a", "b", "c"])
+    osrm = GeoOsrm()
+    r = measure_baseline([trip], stops, osrm, DEPOT0)
+    assert r.total_distance_m == 80000
+    assert trip.method == "registrada" and len(osrm.chamadas) == 1
+
+
+def test_vizinho_mais_proximo_obedece_a_fisica_de_carga():
+    """Com capacidade 1, a coleta mais próxima do depósito não pode vir
+    antes da entrega ("sai cheio, volta cheio" só funciona nessa ordem). O
+    guloso não fecha a viagem, e aí vale a ordem registrada -- o baseline
+    nunca supõe um caminhão que não existe."""
+    entrega = _stop_em("e", -54.7, -22.0)
+    coleta = _stop_em("c", -54.9, -22.0, kind="pickup")
+    trip = BaselineTrip("V1", ["e", "c"])
+    osrm = GeoOsrm()
+    measure_baseline([trip], [entrega, coleta], osrm, DEPOT0, capacidade=1)
+    assert trip.method == "registrada"
+    assert trip.stop_external_ids == ["e", "c"]
+    assert len(osrm.chamadas) == 1
+
+
+def test_compare_publica_contra_qual_ordenacao_o_numero_foi_medido():
+    stops = _tres_em_linha()
+    base = measure_baseline([BaselineTrip("V1", ["a", "b", "c"])], stops,
+                            GeoOsrm(), DEPOT0, capacidade=3)
+    sol = Solution(total_distance_m=30000, total_duration_s=600)
+    assert compare(sol, base).baseline_method == "vizinho_mais_proximo"
