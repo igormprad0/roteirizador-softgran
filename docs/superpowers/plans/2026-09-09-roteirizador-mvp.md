@@ -2625,7 +2625,7 @@ git commit -m "feat: importacao de paradas de locacao com coletas de vencidas"
 
 **Interfaces:**
 - Consumes: `Coord` de `api.app.models`
-- Produces: `Matrix(durations: list[list[float]], distances: list[list[float]])`; `RouteGeometry(polyline: str, distance_m: int, duration_s: int)`; `OsrmClient(base_url: str, timeout: float = 60.0)` com `table(coords) -> Matrix`, `route(coords) -> RouteGeometry`, `nearest(coord) -> Coord`; `OsrmError(RuntimeError)`
+- Produces: `Matrix(durations: list[list[float]], distances: list[list[float]])`; `RouteGeometry(polyline: str, distance_m: int, duration_s: int)`; `OsrmClient(base_url: str, timeout: float = 60.0, max_snap_m: int = 5000)` com `table(coords) -> Matrix`, `route(coords) -> RouteGeometry`, `nearest(coord) -> Coord`; `OsrmError(RuntimeError)`
 
 - [ ] **Step 1: Escrever o teste**
 
@@ -2683,9 +2683,34 @@ def test_nearest_gruda_na_via(client):
 
 
 @pytest.mark.stack
-def test_coordenada_no_meio_do_oceano_levanta_erro(client):
+def test_coordenada_fora_da_malha_levanta_erro(client):
+    """Sem limite de snap o OSRM SEMPRE gruda no nó mais próximo do grafo, por
+    mais absurda que seja a coordenada. Um lon/lat invertido viraria uma rota
+    plausível e errada. O `radiuses` é o que transforma isso em erro alto."""
     with pytest.raises(OsrmError):
         client.route([(-30.0, -30.0), (-31.0, -31.0)])
+
+
+@pytest.mark.stack
+def test_lon_lat_invertido_e_recusado(client):
+    """Dourados com lon/lat trocados cai no Atlântico Sul. É o erro mais fácil
+    de cometer neste projeto e o mais caro — tem de estourar, não passar."""
+    with pytest.raises(OsrmError):
+        client.route([(-22.2210, -54.8060), (-22.2280, -54.8180)])
+
+
+@pytest.mark.stack
+def test_ponto_rural_distante_ainda_e_aceito(client):
+    """O limite de snap não pode ser tão apertado que recuse entrega em
+    chácara. ~12 km ao norte de Dourados, longe de via mapeada."""
+    r = client.route([CENTRO, (-54.8060, -22.1100)])
+    assert r.distance_m > 0
+
+
+@pytest.mark.stack
+def test_table_tambem_respeita_o_limite_de_snap(client):
+    with pytest.raises(OsrmError):
+        client.table([CENTRO, (-30.0, -30.0)])
 ```
 
 - [ ] **Step 2: Rodar — deve falhar**
@@ -2726,9 +2751,18 @@ def _join(coords: list[Coord]) -> str:
 
 
 class OsrmClient:
-    def __init__(self, base_url: str, timeout: float = 60.0):
+    def __init__(self, base_url: str, timeout: float = 60.0,
+                 max_snap_m: int = 5000):
         self._base = base_url.rstrip("/")
         self._http = httpx.Client(timeout=timeout)
+        # Sem isto o OSRM gruda QUALQUER coordenada no nó mais próximo do
+        # grafo, sem reclamar. Um lon/lat invertido ou um geocode lixo viraria
+        # uma rota plausível e completamente errada. 5 km tolera entrega rural
+        # longe de via mapeada e ainda assim recusa o que está noutro estado.
+        self._max_snap_m = max_snap_m
+
+    def _radiuses(self, n: int) -> str:
+        return ";".join([str(self._max_snap_m)] * n)
 
     def _get(self, path: str, params: dict) -> dict:
         r = self._http.get(f"{self._base}{path}", params=params)
@@ -2741,14 +2775,16 @@ class OsrmClient:
 
     def table(self, coords: list[Coord]) -> Matrix:
         body = self._get(f"/table/v1/driving/{_join(coords)}",
-                         {"annotations": "duration,distance"})
+                         {"annotations": "duration,distance",
+                          "radiuses": self._radiuses(len(coords))})
         return Matrix(durations=body["durations"], distances=body["distances"])
 
     def route(self, coords: list[Coord]) -> RouteGeometry:
         if len(coords) < 2:
             return RouteGeometry("", 0, 0)
         body = self._get(f"/route/v1/driving/{_join(coords)}",
-                         {"overview": "full", "geometries": "polyline"})
+                         {"overview": "full", "geometries": "polyline",
+                          "radiuses": self._radiuses(len(coords))})
         route = body["routes"][0]
         return RouteGeometry(route["geometry"], int(route["distance"]),
                              int(route["duration"]))
