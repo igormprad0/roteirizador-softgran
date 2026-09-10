@@ -9,6 +9,10 @@ fonte empresarial/
 roteirizador/data/
 roteirizador/web/vendor/
 
+# Fixture .pbf gerada por tests/fixtures/make_mini_pbf.py — não versionar binário
+roteirizador/tests/fixtures/mini.osm
+roteirizador/tests/fixtures/mini.osm.pbf
+
 # Workspace do subagent-driven-development
 .superpowers/
 
