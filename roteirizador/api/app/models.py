@@ -161,3 +161,10 @@ class Comparison:
     monthly_brl_saved: float
     approximate: bool
     note: str
+    # Quantas paradas cada lado do comparativo cobre (nem sempre iguais --
+    # ver `service.py::optimize`). Para locação, capacidade 1 deixa pouca
+    # margem de ganho em km; o ganho real aparece aqui: quantas paradas a
+    # MESMA frota consegue cobrir num dia, otimizada vs. despacho ingênuo
+    # que preserva a ordem de lançamento sem poder reordenar.
+    baseline_stops: int = 0
+    optimized_stops: int = 0

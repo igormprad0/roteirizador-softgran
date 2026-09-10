@@ -18,6 +18,26 @@ com entrega agendada, mais devoluções).
 Geocodificação é feita por um índice de ruas construído do próprio `.pbf` do OSM,
 sem depender de serviço externo. O ERP não tem nenhum campo de coordenada.
 
+## Resultados medidos (dias reais das duas bases)
+
+| Perfil | O que otimizar realmente muda | Número medido |
+|---|---|---|
+| **Locação** (poliguindaste, capacidade 1) | **Cobertura** — quantas paradas a MESMA frota atende no dia | **25 otimizado vs. 15 na ordem de lançamento crua — +67%** |
+| **Entrega posterior** | **Distância** percorrida | **29,6% menos km** (286,3 → 201,5 km) |
+
+Cada perfil tem um argumento de venda diferente, e o número certo depende
+da física: com capacidade 1, a rota de locação já é quase determinada por
+ela (idas e vindas curtas ao depósito) — reordenar ganha pouco km (0,8%).
+O que a otimização ganha de verdade é CABER mais paradas na mesma frota —
+a ordem de lançamento crua, sem poder reordenar, só encaixa 15 das 25
+paradas que o otimizador atende. Entrega posterior tem caminhões com mais
+capacidade por viagem, então lá a distância evitada por uma rota melhor é
+o número que importa. Os dois números vêm estruturados em
+`comparison.optimized_stops`/`baseline_stops` (cobertura) e
+`comparison.percent_km_saved` (distância) — a UI mostra os dois, para os
+dois perfis, sempre lado a lado; ver "Limitações conhecidas" para a
+história completa por trás do 0,8%.
+
 ## Subir do zero
 
 ```bash
@@ -66,15 +86,18 @@ diferentes).
    configurada (2 caminhões, 14 viagens no total), a rota atende 25 das 38
    paradas do dia — as outras 13 não cabem na frota/janela do dia e aparecem
    destacadas, não escondidas.
-3. Painel **Hoje vs Otimizado**: km, horas e R$/mês. Dizer que o baseline de
-   locação é aproximado (o ERP não registra ordem) — isso constrói
-   credibilidade. Para locação a economia em km é pequena (a física de
-   capacidade 1 não deixa muita margem) — o argumento real aqui é cobertura:
-   25 das 38 paradas do dia com a mesma frota, contra 15 num despacho
-   ingênuo que segue a mesma ordem sem poder reordenar. Dizer isso em voz
-   alta é mais forte que o número de km.
-4. **Entrega posterior, 09/12/2024** — o dia de pico, 215 paradas, para mostrar
-   que escala.
+3. Painel **Hoje vs Otimizado**. **Liderar com a KPI "Paradas com a mesma
+   frota": 25 otimizado vs. 15 na ordem atual.** Essa é a venda para
+   locação — não o km. A física de capacidade 1 não deixa muita margem de
+   km (0,8%, e o painel mostra isso também, sem esconder); o que a mesma
+   frota ganha com otimização é caber 67% mais paradas no dia. Dizer que o
+   baseline de locação é aproximado (o ERP não registra ordem) — isso
+   constrói credibilidade.
+4. **Entrega posterior, 09/12/2024** — o dia de pico, 215 paradas, para
+   mostrar que escala. Depois, no dia de 13/08/2026, **liderar com a KPI de
+   km**: 29,6% de economia (286,3 → 201,5 km) — aqui o argumento é
+   distância, porque a frota tem caminhões de carga fracionada (mais
+   capacidade por viagem), não capacidade 1.
 5. Abrir um romaneio PDF e o link do Google Maps.
 
 ## Limitações conhecidas

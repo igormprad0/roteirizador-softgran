@@ -171,6 +171,17 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
         ).strip())
 
     comp = compare(solucao_comparavel, base, cost_per_km=cost_per_km)
+    # Quantas paradas cada lado realmente cobre com a MESMA frota -- não só
+    # o km/km_saved acima. Para locação, capacidade 1 deixa pouca margem de
+    # ganho em distância (a rota já é quase determinada pela física); o
+    # ganho real é cobertura: `optimized_stops` (o que o otimizador atende
+    # de fato, sem a restrição de justiça do km) contra `baseline_stops` (o
+    # que um despacho ingênuo, preservando ordem de lançamento sem poder
+    # reordenar, consegue encaixar na mesma frota). Estruturado como número,
+    # não só em `note`, para a UI poder mostrar sem parsear texto em
+    # português.
+    comp = dataclasses.replace(
+        comp, baseline_stops=len(cobertas_pelo_baseline), optimized_stops=len(atendidas))
 
     payload = {
         "profile": profile.value,

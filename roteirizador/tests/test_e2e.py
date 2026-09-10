@@ -77,7 +77,8 @@ def test_comparativo_tem_todos_os_numeros():
     run, _ = _otimizar("entrega_posterior", EP_ULTIMO)
     c = run["comparison"]
     assert set(c) >= {"baseline_km", "optimized_km", "km_saved", "hours_saved",
-                      "percent_km_saved", "monthly_brl_saved", "approximate", "note"}
+                      "percent_km_saved", "monthly_brl_saved", "approximate", "note",
+                      "baseline_stops", "optimized_stops"}
     assert c["baseline_km"] > 0
     assert c["approximate"] is False        # baseline real: veículo e hora do ERP
 
@@ -86,6 +87,22 @@ def test_baseline_de_locacao_vem_marcado_como_aproximado():
     run, _ = _otimizar("locacao", LOC_DIA)
     assert run["comparison"]["approximate"] is True
     assert run["comparison"]["note"]
+
+
+def test_cobertura_da_mesma_frota_e_numero_nao_so_texto():
+    """Achado do coordenador (fix round 2): para capacidade 1, a rota já é
+    quase determinada pela física -- o km quase não muda com otimização.
+    O ganho real é cobertura: quantas paradas a MESMA frota atende,
+    otimizado vs. despacho que preserva a ordem de lançamento sem poder
+    reordenar. Isso não pode existir só dentro do texto em português de
+    `comparison.note` -- a UI não consegue renderizar isso. Tem que ser
+    número, para os dois perfis."""
+    run, _ = _otimizar("locacao", LOC_DIA)
+    c = run["comparison"]
+    assert isinstance(c["baseline_stops"], int) and isinstance(c["optimized_stops"], int)
+    assert c["optimized_stops"] > c["baseline_stops"], (
+        f"com a mesma frota, o otimizado ({c['optimized_stops']}) deveria "
+        f"cobrir mais paradas que a ordem atual ({c['baseline_stops']})")
 
 
 # --- critérios 5 e 6: exportação e aprendizado do cache ----------------------

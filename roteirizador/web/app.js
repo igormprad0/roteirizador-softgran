@@ -160,9 +160,17 @@ function renderPanel(run) {
   const t = run.totals;
   const bom = c.km_saved > 0;
   const faltam = t.stops_unassigned > 0;
+  // Cobertura com a MESMA frota, otimizado vs. despacho na ordem de
+  // lançamento (sem poder reordenar) -- sempre mostrado, para os dois
+  // perfis, lado a lado com o km. Para locação (capacidade 1) a rota já é
+  // quase determinada pela física, então o km quase não muda -- o ganho
+  // real é aqui: quantas paradas a mesma frota consegue cobrir no dia.
+  const maisCobertura = c.optimized_stops > c.baseline_stops;
   $("kpis").innerHTML = `
     <div class="kpi ${faltam ? "warn" : "good"}"><span>Paradas atendidas</span>
       <strong>${t.stops_served} / ${t.stops_total}</strong></div>
+    <div class="kpi ${maisCobertura ? "good" : ""}"><span>Paradas com a mesma frota</span>
+      <strong>${c.optimized_stops} otimizado vs ${c.baseline_stops} ordem atual</strong></div>
     <div class="kpi"><span>Rota atual</span><strong>${c.baseline_km} km</strong></div>
     <div class="kpi"><span>Rota otimizada</span><strong>${c.optimized_km} km</strong></div>
     <div class="kpi ${bom ? "good" : ""}"><span>Economia</span>
