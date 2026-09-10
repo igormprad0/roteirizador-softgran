@@ -33,6 +33,6 @@ services:
       LOCAL_DB: /srv/data/local.db
       STREETS_DB: /srv/data/streets.db
       OSM_PBF: /srv/data/osm/regiao.osm.pbf
-    volumes: ["./data:/srv/data", "./api:/srv/api", "./web:/srv/web", "./tests:/srv/tests"]
+    volumes: ["./data:/srv/data", "./api:/srv/api", "./web:/srv/web", "./tests:/srv/tests", "./scripts:/srv/scripts"]
     ports: ["8000:8000"]
     depends_on: [osrm, vroom, firebird]
