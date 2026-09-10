@@ -467,3 +467,23 @@ print(g.matched_text)
         )
         resultados.add(out.stdout.strip())
     assert len(resultados) == 1, f"resultados diferentes entre seeds de hash: {resultados}"
+
+
+def test_cidade_fora_do_indice_nunca_passa_de_low(geo):
+    """Sem centroide da cidade, TODO o escopo geográfico some em silêncio:
+    `_partition_by_proximity` devolve todos os candidatos como "perto" e a
+    rede de segurança no fim de `_by_street` não tem contra o que medir --
+    um casamento em qualquer ponto do extrato voltava `high`/`medium`. Caso
+    real: cidade "PEROLA D'OESTE" (Paraná, fora do extrato) resolvendo em
+    "CORONEL PONCIANO", em Dourados, com `medium`. O ponto continua sendo o
+    melhor palpite disponível; a CONFIANÇA é que não pode afirmar posição.
+
+    Prova de que o teto não é vácuo: o mesmo endereço, com a cidade que o
+    índice conhece, resolve `high`."""
+    _, com_cidade = geo.geocode(_a("RUA MATO GROSSO, 1973"))
+    assert com_cidade.confidence == "high"
+
+    _, sem_cidade = geo.geocode(_a("RUA MATO GROSSO, 1973",
+                                   cidade="PEROLA D OESTE"))
+    assert sem_cidade.source != "none"          # achou alguma coisa
+    assert sem_cidade.confidence == "low"

@@ -1,8 +1,8 @@
 import pytest
 from api.app.models import Address
 from api.app.geo.normalize import (
-    NormalizedAddress, expand_abbreviations, normalize_address,
-    normalize_city, split_number, strip_accents,
+    NormalizedAddress, _numero_de_porta, expand_abbreviations,
+    normalize_address, normalize_city, split_number, strip_accents,
 )
 
 
@@ -223,3 +223,31 @@ def test_split_number_descarta_parenteses_finais_fechado_ou_truncado(entrada, ru
     trunca o campo no meio, sem fechar o parêntese ('(fundos Ecov')."""
     street, _, _ = split_number(entrada)
     assert street == rua_esperada
+
+
+@pytest.mark.parametrize("numero_erp,esperado", [
+    # o que É número de porta
+    ("345", "345"), (" 1234 ", "1234"), ("4350-A", "4350"), ("98 B", "98"),
+    # o que NÃO é: quadra/lote, sem número, texto solto
+    ("Q16/L9", None), ("S/N", None), ("Q03 - LT01A", None),
+    ("QD 5 LT 12", None), ("SN", None), ("-", None), ("", None),
+])
+def test_numero_de_porta_recusa_quadra_lote_e_sem_numero(numero_erp, esperado):
+    r"""O campo NUMERO do ERP guarda muito mais que número de porta, e
+    `re.sub(r"\D", "", ...)` transformava "Q16/L9" em 169 -- entregue à
+    interpolação de número de porta como se fosse a porta 169 da rua. Um
+    ponto inventado com cara de precisão. Quando o valor não é número de
+    porta, o certo é NÃO haver número: a cascata do geocoder cai para o
+    segmento/bairro, que é honesto."""
+    assert _numero_de_porta(numero_erp) == esperado
+
+
+def test_numero_do_cadastro_nao_entra_quando_nao_e_numero_de_porta():
+    """Ponta a ponta pelo `normalize_address`: o valor imprestável do
+    cadastro não pode nem sobrescrever nem inventar número."""
+    addr = Address("RUA MATO GROSSO, 1973", "Q16/L9", "CENTRO",
+                   "DOURADOS", "MS", None, "")
+    assert normalize_address(addr).number == "1973"     # o do texto sobrevive
+    addr_sem_texto = Address("RUA MATO GROSSO", "Q16/L9", "CENTRO",
+                             "DOURADOS", "MS", None, "")
+    assert normalize_address(addr_sem_texto).number is None

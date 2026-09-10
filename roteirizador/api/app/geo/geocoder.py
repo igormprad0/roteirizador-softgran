@@ -1,4 +1,5 @@
 from __future__ import annotations
+import dataclasses
 import json
 import re
 import sqlite3
@@ -93,6 +94,17 @@ class Geocoder:
                       or self._by_bairro(con, n, city_centro)
                       or self._by_cidade(con, n)
                       or GeoResult(0.0, 0.0, "failed", "none"))
+            if city_centro is None and result.confidence in ("high", "medium"):
+                # Sem centroide da cidade, TODO o escopo geográfico some em
+                # silêncio: `_partition_by_proximity` devolve tudo como
+                # "perto" e a rede de segurança do fim de `_by_street` não
+                # tem contra o que medir. Um casamento em qualquer ponto do
+                # extrato volta como high/medium -- caso real: cidade
+                # "PEROLA D'OESTE" (Paraná, fora do extrato) resolvendo em
+                # "CORONEL PONCIANO", em Dourados, com `medium`. O resultado
+                # continua sendo o melhor palpite disponível, mas a
+                # confiança não pode afirmar posição: teto em `low`.
+                result = dataclasses.replace(result, confidence="low")
         finally:
             con.close()
 

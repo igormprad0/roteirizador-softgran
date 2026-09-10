@@ -178,6 +178,27 @@ def split_number(s: str) -> tuple[str, str | None, str | None]:
     return s, number, complement
 
 
+# Um número de porta é um número de porta: dígitos, no máximo com um sufixo
+# de uma letra ("1234", "1234-A", "1234 B"). O campo NUMERO do ERP guarda
+# muito mais que isso -- "Q16/L9" (quadra 16, lote 9), "S/N", "Q03 - LT01A".
+# Arrancar os dígitos com `re.sub(r"\D", "")` transformava "Q16/L9" em 169 e
+# entregava isso à interpolação de número de porta como se fosse a porta
+# 169 da rua: um ponto inventado com aparência de precisão. Quando o valor
+# não é um número de porta, o certo é dizer que NÃO HÁ número -- a cascata
+# do geocoder já sabe cair para o segmento/bairro, que é honesto.
+_NUMERO_PORTA = re.compile(r"^(\d{1,6})\s*-?\s*([A-Z])?$")
+
+
+def _numero_de_porta(valor: str) -> str | None:
+    """Devolve só os dígitos quando o valor É um número de porta, senão None.
+    O sufixo de letra é aceito na ENTRADA (para "1234-A" não ser descartado
+    junto com "Q16/L9") mas não vai para a chave: o índice de números do OSM
+    guarda só o numeral, e era assim que a versão anterior já se comportava
+    para esse caso."""
+    m = _NUMERO_PORTA.match(strip_accents(valor).upper().strip())
+    return m.group(1) if m else None
+
+
 @dataclass(frozen=True)
 class NormalizedAddress:
     street: str
@@ -198,7 +219,7 @@ def normalize_address(addr: Address, default_city: str = "DOURADOS",
     street, number, complement = split_number(addr.logradouro or addr.raw or "")
 
     if addr.numero and str(addr.numero).strip():
-        number = re.sub(r"\D", "", str(addr.numero)) or number
+        number = _numero_de_porta(str(addr.numero)) or number
 
     bairro = None
     if addr.bairro and addr.bairro.strip():
