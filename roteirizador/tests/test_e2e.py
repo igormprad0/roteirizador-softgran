@@ -80,7 +80,14 @@ def test_comparativo_tem_todos_os_numeros():
                       "percent_km_saved", "monthly_brl_saved", "approximate", "note",
                       "baseline_stops", "optimized_stops"}
     assert c["baseline_km"] > 0
-    assert c["approximate"] is False        # baseline real: veículo e hora do ERP
+    # `approximate` acompanha a reconstrução do baseline, não o perfil.
+    # Neste dia parte das paradas está em caixas de despacho do ERP
+    # (DV/RETIRA/CIF) e não em caminhão -- então a ressalva TEM de aparecer.
+    # O que nunca pode acontecer é um baseline inviável passar por real.
+    assert run["baseline"]["infeasible"] == []
+    assert c["approximate"] is run["baseline"]["approximate"]
+    if c["approximate"]:
+        assert c["note"]
 
 
 def test_baseline_de_locacao_vem_marcado_como_aproximado():
@@ -90,19 +97,73 @@ def test_baseline_de_locacao_vem_marcado_como_aproximado():
 
 
 def test_cobertura_da_mesma_frota_e_numero_nao_so_texto():
-    """Achado do coordenador (fix round 2): para capacidade 1, a rota já é
-    quase determinada pela física -- o km quase não muda com otimização.
-    O ganho real é cobertura: quantas paradas a MESMA frota atende,
-    otimizado vs. despacho que preserva a ordem de lançamento sem poder
-    reordenar. Isso não pode existir só dentro do texto em português de
-    `comparison.note` -- a UI não consegue renderizar isso. Tem que ser
-    número, para os dois perfis."""
+    """Cobertura tem de existir como NÚMERO, calculada sobre a mesma frota
+    dos dois lados -- a UI não consegue renderizar prosa em português.
+
+    Este teste já afirmou `optimized_stops > baseline_stops`. Isso não era
+    comportamento, era a alegação de marketing ("+67% de throughput") virada
+    assert: o `baseline_stops` de então era artefato de uma regra que
+    nenhum despachante segue (encerrar a viagem no primeiro pedido adjacente
+    que não cabe, sem olhar o próximo da fila), o que com capacidade 1
+    prendia o número em `nº de viagens + 1` qualquer que fosse o dado. Com a
+    varredura para a frente, os dois lados podem empatar -- e empatar é um
+    resultado, não uma falha. O que o teste prende agora é o mecanismo:
+    os dois números existem, saem da MESMA frota, e nenhuma das viagens de
+    baseline que produziu `baseline_stops` é inviável."""
     run, _ = _otimizar("locacao", LOC_DIA)
     c = run["comparison"]
+    base = run["baseline"]
     assert isinstance(c["baseline_stops"], int) and isinstance(c["optimized_stops"], int)
-    assert c["optimized_stops"] > c["baseline_stops"], (
-        f"com a mesma frota, o otimizado ({c['optimized_stops']}) deveria "
-        f"cobrir mais paradas que a ordem atual ({c['baseline_stops']})")
+
+    # mesma frota dos dois lados: as viagens do baseline saem da lista
+    # expandida da frota configurada, e é ela que o VROOM recebe
+    frota = client.get("/api/fleet", params={"profile": "locacao"}).json()["fleet"]
+    viagens_da_frota = sum(v["trips"] for v in frota if v["enabled"])
+    assert len(base["trips"]) <= viagens_da_frota, (
+        f"{len(base['trips'])} viagens de baseline para uma frota de "
+        f"{viagens_da_frota} viagens -- os dois lados não estão na mesma frota")
+
+    # `baseline_stops` é a contagem dessas viagens, não um número solto
+    assert c["baseline_stops"] == len(
+        {i for t in base["trips"] for i in t["stop_external_ids"]})
+    assert c["optimized_stops"] == sum(len(r["steps"]) for r in run["routes"])
+    assert base["infeasible"] == [], base["infeasible"]
+
+
+@pytest.mark.parametrize("profile,dia", [("locacao", LOC_DIA),
+                                         ("entrega_posterior", EP_ULTIMO),
+                                         ("entrega_posterior", EP_PICO)])
+def test_toda_viagem_do_baseline_caberia_na_frota(profile, dia):
+    """A regra de governo deste projeto: *uma viagem de baseline que não
+    poderia ter sido executada nunca pode ser reportada como real*.
+
+    Verifica por conta própria -- simula a carga ao longo de cada viagem e
+    compara a duração medida contra o turno -- em vez de ler o veredito de
+    `service.viagens_inviaveis`. Um portão que só se auto-confirma não
+    protege ninguém. Antes da correção, este teste falhava no dia de pico:
+    o ERP agrupava 125 paradas sob "ENTREGA DUVIDOSA / BAIXA DV" (caixa de
+    baixa administrativa, não caminhão) e o baseline as roteava como uma
+    volta contínua de 391 km / 31,6 h -- reportada com approximate=False."""
+    run, _ = _otimizar(profile, dia)
+    frota = [v for v in client.get("/api/fleet", params={"profile": profile}
+                                   ).json()["fleet"] if v["enabled"]]
+    assert frota
+    cap_max = max(v["capacity"] for v in frota)
+    turno_max_h = max(v["shift_end_s"] - v["shift_start_s"] for v in frota) / 3600
+    tipo = {s["external_id"]: (s["kind"], s["amount"]) for s in run["stops"]}
+
+    for t in run["baseline"]["trips"]:
+        paradas = [tipo[i] for i in t["stop_external_ids"] if i in tipo]
+        carga = sum(a for k, a in paradas if k == "delivery")
+        assert carga <= cap_max, (
+            f"{dia} {t['label']}: sai do depósito com {carga} a bordo, "
+            f"capacidade máxima da frota é {cap_max}")
+        for k, a in paradas:
+            carga += -a if k == "delivery" else a
+            assert carga <= cap_max, f"{dia} {t['label']}: carga {carga} > {cap_max}"
+        assert t["duration_h"] <= turno_max_h, (
+            f"{dia} {t['label']}: {t['duration_h']} h num turno de "
+            f"{turno_max_h} h -- nenhum motorista fez essa volta")
 
 
 # --- critérios 5 e 6: exportação e aprendizado do cache ----------------------

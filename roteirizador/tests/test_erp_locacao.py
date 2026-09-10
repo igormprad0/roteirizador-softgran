@@ -5,7 +5,7 @@ import pytest
 
 from api.app.config import ImportMode, Profile
 from api.app.db.firebird import connect
-from api.app.erp.base import build_source
+from api.app.erp.base import build_source, cabe
 from api.app.erp.locacao import LocacaoSource
 from api.app.models import Address, Depot, Stop, VehicleConfig
 from api.app.routing.vroom import expand_trips
@@ -195,7 +195,7 @@ def test_baseline_respeita_capacidade_da_viagem(src):
     assert trips, "frota realista deveria produzir pelo menos uma viagem"
     for t in trips:
         viagem = [por_id[i] for i in t.stop_external_ids]
-        assert LocacaoSource._cabe(viagem, 1), (
+        assert cabe(viagem, 1), (
             f"{t.label} excede capacidade 1: "
             f"{[(s.kind, s.amount) for s in viagem]}")
         n_entregas = sum(1 for s in viagem if s.kind == "delivery")
@@ -225,15 +225,15 @@ def test_cabe_permite_entrega_seguida_de_coleta_mas_nao_o_contrario():
     coleta = _mini_stop("P1", "pickup", 1)
     outra_entrega = _mini_stop("E2", "delivery", 2)
 
-    assert LocacaoSource._cabe([entrega, coleta], 1)              # sai cheio, volta cheio
-    assert not LocacaoSource._cabe([entrega, outra_entrega], 1)   # 2 entregas ao mesmo tempo
-    assert not LocacaoSource._cabe([coleta, entrega], 1)          # ordem errada, capacidade 1
-    assert LocacaoSource._cabe([coleta, entrega], 2)              # capacidade 2 já tolera a troca
+    assert cabe([entrega, coleta], 1)              # sai cheio, volta cheio
+    assert not cabe([entrega, outra_entrega], 1)   # 2 entregas ao mesmo tempo
+    assert not cabe([coleta, entrega], 1)          # ordem errada, capacidade 1
+    assert cabe([coleta, entrega], 2)              # capacidade 2 já tolera a troca
 
 
 def test_baseline_order_encadeia_entrega_e_coleta_numa_so_viagem_sintetica():
     """Mesma prova, mas passando pelo caminho real (`baseline_order`, não só
-    `_cabe` isolado): com uma entrega seguida de uma coleta na ordem de
+    `cabe` isolado): com uma entrega seguida de uma coleta na ordem de
     lançamento e uma frota de capacidade 1, as duas paradas caem na MESMA
     viagem -- o comportamento que a correção do coordenador pediu."""
     stops = [_mini_stop("E1", "delivery", 0), _mini_stop("P1", "pickup", 1)]

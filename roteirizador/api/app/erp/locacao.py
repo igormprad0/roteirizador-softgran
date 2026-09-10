@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from ..config import ImportMode, Profile
 from ..db.firebird import ErpConnection
 from ..models import Address, BaselineTrip, Stop, Vehicle
+from .base import cabe
 
 _ENTREGAS = """
 SELECT lp.ID_SEQUENCIA, lp.DATA_LOCACAO, lp.DOCUMENTO, lp.ID_CLIENTE,
@@ -48,6 +49,10 @@ ORDER BY lp.DATA_LOCACAO, lp.ID_SEQUENCIA
 """
 
 
+APROX_LOCACAO = ("baseline aproximado: o ERP não registra veículo nem ordem "
+                 "para locação; usada a ordem de lançamento")
+
+
 def _s(v) -> str | None:
     if v is None:
         return None
@@ -64,6 +69,11 @@ class LocacaoSource:
         self._overdue_days = overdue_days
         self._max_pickups = max_pickups
         self.dropped_pickups = 0        # coletas vencidas que não couberam no teto
+        # O ERP de locação não registra veículo nem ordem de rota: este
+        # baseline é SEMPRE uma reconstrução, e diz isso de si mesmo em vez
+        # de `service.py` deduzir pelo perfil.
+        self.baseline_approximate = True
+        self.baseline_note = APROX_LOCACAO
 
     # ------------------------------------------------------------------
     def _address(self, r: dict) -> Address:
@@ -158,7 +168,10 @@ class LocacaoSource:
         ser recolhida -- por isso uma viagem de capacidade 1 PODE, sim,
         entregar um equipamento e na sequência coletar o vencido ("sai
         cheio, volta cheio"), mas não pode carregar duas entregas ao mesmo
-        tempo. `_cabe` simula exatamente essa física."""
+        tempo. `erp/base.py::cabe` simula exatamente essa física -- mora lá,
+        e não aqui, porque é física de carga e não regra de locação: a
+        ausência dela no caminho de entrega posterior foi o que deixou uma
+        volta contínua de 125 paradas passar por rota real."""
         if not stops or not vehicles:
             return []
         fila = sorted(stops, key=lambda s: s.erp_sequence)
@@ -167,27 +180,25 @@ class LocacaoSource:
             if not fila:
                 break
             viagem: list[Stop] = []
-            while fila and self._cabe(viagem + [fila[0]], v.capacity):
-                viagem.append(fila.pop(0))
+            # Varre a fila PARA A FRENTE em vez de exigir que a próxima
+            # parada caiba na hora: um despachante que já tem a caçamba a
+            # bordo pula o pedido que não cabe e leva o próximo que cabe --
+            # ninguém manda o caminhão embora meio vazio porque a linha
+            # seguinte da lista não coube. A versão anterior encerrava a
+            # viagem no primeiro "não cabe" adjacente, o que com capacidade
+            # 1 travava o baseline em `nº de viagens + 1` paradas
+            # independentemente dos dados: o tamanho da frota disfarçado de
+            # medição. A ordem de lançamento continua sendo respeitada (nada
+            # é reordenado, só saltado) e a capacidade também.
+            i = 0
+            while i < len(fila):
+                if cabe(viagem + [fila[i]], v.capacity):
+                    viagem.append(fila.pop(i))
+                else:
+                    i += 1
             if viagem:
                 # `v.label` já vem qualificado com "— viagem N" para N > 1
                 # (montado em `expand_trips`); não duplicar aqui.
                 trips.append(BaselineTrip(
                     label=v.label, stop_external_ids=[s.external_id for s in viagem]))
         return trips
-
-    @staticmethod
-    def _cabe(viagem: list[Stop], capacidade: int) -> bool:
-        """Simula a carga ao longo de UMA viagem, na ordem dada. Toda entrega
-        da viagem precisa estar pré-carregada no depósito antes da partida
-        (soma de todas as entregas, não só a próxima) -- por isso a carga
-        inicial já conta como um pico a respeitar, não só os picos depois de
-        cada coleta."""
-        carga = sum(s.amount for s in viagem if s.kind == "delivery")
-        if carga > capacidade:
-            return False
-        for s in viagem:
-            carga += -s.amount if s.kind == "delivery" else s.amount
-            if carga > capacidade:
-                return False
-        return True

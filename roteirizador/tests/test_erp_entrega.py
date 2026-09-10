@@ -9,6 +9,32 @@ from api.app.erp.entrega_posterior import EntregaPosteriorSource
 
 PICO = date(2024, 12, 9)
 ULTIMO = date(2026, 8, 13)
+# Dia com o maior número de FLAG_DEV_VENDAS = 1 da tabela (nenhuma das duas
+# datas da demo tem uma sequer).
+DIA_COM_DEVOLUCAO = date(2020, 7, 8)
+
+
+# Linha crua do _SQL, com só o que `fetch` lê. Serve para exercitar caminhos
+# que as datas reais não exercitam, sem depender do que a base por acaso tem.
+_LINHA_BASE = {
+    "PCAB_ID": 1, "ID_ENTREGA": 10, "DATA": ULTIMO, "HORA": None,
+    "ID_VEICULO": None, "FLAG_DEV_VENDAS": 0, "ID_CLIENTE": 7,
+    "CLIENTE_NOME": "CLIENTE X", "LOGRADOURO": "RUA MATO GROSSO, 1973",
+    "CLIENTE_ENDERECO": None, "CLIENTE_BAIRRO": "CENTRO",
+    "CLIENTE_CIDADE": "DOURADOS", "CLIENTE_UF": "MS", "VENCIMENTO": None,
+    "DOCUMENTO": "999", "TIPO_ENTREGA": None, "CF_NOME": "CLIENTE X",
+    "CF_ENDERECO": "RUA JATOBA", "CF_NUMERO": "50", "CF_BAIRRO": "JARDIM",
+    "CF_CIDADE": "DOURADOS", "CF_UF": "MS", "CF_CEP": "79800000",
+    "VEICULO_PLACA": None, "VEICULO_DESCRICAO": None,
+}
+
+
+class _ConnFake:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, sql, params=()):
+        return self._rows
 
 
 @pytest.fixture(scope="module")
@@ -79,10 +105,38 @@ def test_endereco_preenchido_e_cidade_default(src):
     assert all(s.address.cidade for s in stops)
 
 
+def test_devolucao_vira_pickup_com_linha_sintetica():
+    """`FLAG_DEV_VENDAS = 1` vira coleta. A versão anterior deste teste
+    afirmava `{s.kind} <= {"delivery","pickup"}` contra o dia de pico: uma
+    tautologia (não existe terceiro valor de `kind`) sobre um dia que tem
+    ZERO devoluções -- o ramo de coleta podia ser código morto que o teste
+    passava igual. Aqui a linha é sintética e determinística, então a
+    afirmação é sobre o mapeamento e não sobre o que o dia por acaso tem."""
+    entrega = dict(_LINHA_BASE, PCAB_ID=1, FLAG_DEV_VENDAS=0)
+    devolucao = dict(_LINHA_BASE, PCAB_ID=2, FLAG_DEV_VENDAS=1)
+    src = EntregaPosteriorSource(_ConnFake([entrega, devolucao]))
+    a, b = src.fetch(ULTIMO, ImportMode.REPLANEJAR)
+    assert (a.kind, b.kind) == ("delivery", "pickup")
+    # coleta demora mais que entrega -- se o ramo sumir, isto cai junto
+    assert b.service_seconds > a.service_seconds
+
+
 @pytest.mark.erp
-def test_devolucao_vira_pickup(src):
-    stops = src.fetch(PICO, ImportMode.REPLANEJAR)
-    assert {s.kind for s in stops} <= {"delivery", "pickup"}
+def test_devolucao_vira_pickup_num_dia_real(src):
+    """O mesmo mapeamento contra a base de verdade. 2020-07-08 é o dia com
+    mais `FLAG_DEV_VENDAS = 1` da tabela (4 linhas, de 125 no total); nas
+    duas datas da demo não há nenhuma, e era por isso que este caminho
+    ficou sem cobertura real o projeto inteiro."""
+    stops = src.fetch(DIA_COM_DEVOLUCAO, ImportMode.REPLANEJAR)
+    with connect(Profile.ENTREGA_POSTERIOR) as c:
+        esperados = {f"EP:{int(r['ID_CONTROLE'])}" for r in c.query(
+            "SELECT ID_CONTROLE FROM ENTREGA_PCAB "
+            "WHERE DATA = ? AND FLAG_DEV_VENDAS = 1 AND SITUACAO <> 3",
+            (DIA_COM_DEVOLUCAO,))}
+    assert esperados, "dia escolhido não tem mais devolução -- troque a data"
+    coletas = {s.external_id for s in stops if s.kind == "pickup"}
+    assert coletas == esperados & {s.external_id for s in stops}
+    assert coletas
 
 
 @pytest.mark.erp

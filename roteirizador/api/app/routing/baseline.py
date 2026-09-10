@@ -20,8 +20,10 @@ def measure_baseline(trips: list[BaselineTrip], stops: list[Stop], osrm,
         usados += 1
         coords = [depot.coord] + [s.geo.coord for s in seq] + [depot.coord]
         leg = osrm.route(coords)
-        dist += leg.distance_m
-        dur += leg.duration_s + sum(s.service_seconds for s in seq)
+        trip.distance_m = leg.distance_m
+        trip.duration_s = leg.duration_s + sum(s.service_seconds for s in seq)
+        dist += trip.distance_m
+        dur += trip.duration_s
 
     return BaselineResult(trips=trips, total_distance_m=dist, total_duration_s=dur,
                           vehicles_used=usados, approximate=approximate, note=note)

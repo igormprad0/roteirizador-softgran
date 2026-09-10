@@ -137,6 +137,11 @@ class Solution:
 class BaselineTrip:
     label: str
     stop_external_ids: list[str]
+    # Preenchidos por `routing/baseline.py::measure_baseline`. Existem para
+    # o portão de viabilidade em `service.optimize` poder perguntar "esta
+    # viagem caberia num turno?" sem roteirizar tudo de novo.
+    distance_m: int = 0
+    duration_s: int = 0
 
 
 @dataclass

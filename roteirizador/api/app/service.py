@@ -5,7 +5,8 @@ from datetime import date
 from .config import ImportMode, PROFILES, Profile, get_settings
 from .db.firebird import connect
 from .db.local import LocalStore
-from .erp.base import build_source
+from .erp.base import build_source, cabe
+from .export.maps_link import waze_link
 from .geo.geocoder import Geocoder
 from .models import BaselineTrip, Depot, Stop, VehicleConfig, VehicleRoute
 from .routing.baseline import compare, measure_baseline
@@ -13,8 +14,53 @@ from .routing.optimizer import Optimizer
 from .routing.osrm import OsrmClient
 from .routing.vroom import expand_trips
 
-_APROX_LOCACAO = ("baseline aproximado: o ERP não registra veículo nem ordem "
-                  "para locação; usada a ordem de lançamento")
+
+def viagens_inviaveis(trips: list[BaselineTrip], stops: list[Stop],
+                      fleet: list[VehicleConfig]) -> list[str]:
+    """Portão de viabilidade do baseline, aplicado a TODO perfil.
+
+    Regra de governo deste projeto: *uma viagem de baseline que não poderia
+    ter sido executada nunca pode ser apresentada como real*. Cinco vezes
+    neste projeto um defeito fez o número do painel melhorar sem quebrar
+    teste nenhum, e o caso mais caro foi este: 125 paradas de uma caixa de
+    despacho do ERP roteadas como uma volta contínua de 391 km e 31,6 h,
+    comparadas contra 89,8 km otimizados, resultando em "77% de economia,
+    approximate=False". Nenhum caminhão poderia ter feito aquela volta.
+
+    Este portão não conserta a reconstrução do baseline (isso é papel de
+    cada `StopSource.baseline_order`) -- ele é a rede que pega o que passar,
+    incluindo casos futuros que ninguém previu. Compara cada viagem contra o
+    MAIOR veículo e o MAIOR turno configurados: se nem o melhor caso da
+    frota executaria a viagem, ela não é real.
+
+    Devolve a lista de motivos (vazia = tudo factível)."""
+    if not fleet or not trips:
+        return []
+    cap_max = max(v.capacity for v in fleet)
+    turno_max = max(v.shift_end_s - v.shift_start_s for v in fleet)
+    por_id = {s.external_id: s for s in stops}
+    excesso_carga: list[str] = []
+    excesso_turno: list[str] = []
+    for t in trips:
+        seq = [por_id[i] for i in t.stop_external_ids if i in por_id]
+        if seq and not cabe(seq, cap_max):
+            excesso_carga.append(f"{t.label} ({len(seq)} paradas)")
+        if t.duration_s > turno_max:
+            excesso_turno.append(f"{t.label} ({t.duration_s / 3600:.1f} h)")
+
+    motivos = []
+    if excesso_carga:
+        motivos.append(
+            f"{len(excesso_carga)} viagem(ns) do baseline excedem a maior "
+            f"capacidade da frota ({cap_max}): {', '.join(excesso_carga[:3])}"
+            + (" ..." if len(excesso_carga) > 3 else ""))
+    if excesso_turno:
+        motivos.append(
+            f"{len(excesso_turno)} viagem(ns) do baseline não caberiam no "
+            f"maior turno configurado ({turno_max / 3600:.0f} h): "
+            f"{', '.join(excesso_turno[:3])}"
+            + (" ..." if len(excesso_turno) > 3 else ""))
+    return motivos
 
 
 def store() -> LocalStore:
@@ -68,6 +114,12 @@ def stop_payload(s: Stop) -> dict:
         "external_id": s.external_id, "kind": s.kind,
         "cliente_id": s.cliente_id, "cliente_nome": s.cliente_nome,
         "address": endereco, "address_key": s.address_key,
+        # Os campos estruturados vão junto do texto colapsado: o CSV tem
+        # colunas `bairro` e `cidade` e `main._rebuild` remonta as paradas a
+        # partir DESTE payload -- sem isso as duas colunas saíam sempre
+        # vazias, porque só sobrevivia a string concatenada.
+        "logradouro": a.logradouro, "bairro": a.bairro, "cidade": a.cidade,
+        "uf": a.uf,
         "amount": s.amount, "priority": s.priority,
         "days_overdue": s.days_overdue, "doc": s.doc, "notes": s.notes,
         "lon": s.geo.lon if s.geo else None,
@@ -83,9 +135,14 @@ def route_payload(r: VehicleRoute) -> dict:
         "trip_index": r.trip_index, "geometry": r.geometry,
         "distance_km": round(r.distance_m / 1000, 1),
         "duration_min": round(r.duration_s / 60),
+        # Deep link de navegação por parada (§6.3 do spec). Vai no payload,
+        # e não montado no cliente, para o app.js e o romaneio PDF usarem
+        # exatamente a mesma função -- inversão de lat/lon é o erro clássico
+        # aqui e não pode existir em duas versões.
         "steps": [{"seq": s.seq, "stop_external_id": s.stop_external_id,
                    "kind": s.kind, "lon": s.lon, "lat": s.lat,
-                   "arrival_s": s.arrival_s, "load_after": s.load_after}
+                   "arrival_s": s.arrival_s, "load_after": s.load_after,
+                   "waze_url": waze_link(s)}
                   for s in sorted(r.steps, key=lambda x: x.seq)],
     }
 
@@ -122,13 +179,29 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
     # respeitar, senão o comparativo mede um lado contra uma rota que não
     # poderia ter sido executada (ver `erp/locacao.py::baseline_order`).
     with connect(profile) as conn:
-        trips = build_source(profile, conn).baseline_order(
-            atendidas, expand_trips(fleet, depot))
-    aproximado = profile is Profile.LOCACAO
+        source = build_source(profile, conn)
+        trips = source.baseline_order(atendidas, expand_trips(fleet, depot))
+        # Quem sabe se o baseline é medido ou reconstruído é a fonte, não
+        # este arquivo. Antes daqui a regra era `profile is Profile.LOCACAO`
+        # -- entrega posterior saía com `approximate=False` incondicional,
+        # inclusive no dia em que 125 das 128 paradas vinham de uma caixa de
+        # despacho que nunca foi caminhão nenhum.
+        aproximado = source.baseline_approximate
+        note = source.baseline_note
     osrm = OsrmClient(get_settings().osrm_url)
-    note = _APROX_LOCACAO if aproximado else ""
     base = measure_baseline(trips, atendidas, osrm, depot,
                             approximate=aproximado, note=note)
+
+    # Portão de viabilidade: vale para todo perfil e roda DEPOIS da medição,
+    # porque só aí cada viagem tem duração. Ver `viagens_inviaveis`.
+    inviaveis = viagens_inviaveis(trips, atendidas, fleet)
+    if inviaveis:
+        aproximado = True
+        note = ((note + " " if note else "")
+                + "baseline NÃO executável: " + "; ".join(inviaveis)
+                + ". A comparação abaixo é contra uma rota que a frota "
+                  "configurada não conseguiria fazer -- trate como indicativo.")
+        base = dataclasses.replace(base, approximate=True, note=note)
 
     # O baseline aproximado respeita ordem de lançamento E capacidade (ver
     # `LocacaoSource.baseline_order`) -- diferente do otimizador, ele não
@@ -190,6 +263,21 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
         "depot": {"label": depot.label, "lon": depot.lon, "lat": depot.lat,
                   "address": depot.address},
         "stops": [stop_payload(s) for s in stops],
+        # O baseline deixa de ser um número opaco: cada viagem que ele supõe
+        # vai no payload, com o que foi medido nela. É contra isto que o
+        # teste e2e verifica viabilidade por conta própria (capacidade e
+        # turno) em vez de acreditar no veredito de `viagens_inviaveis` --
+        # um portão que só se auto-confirma não protege ninguém.
+        "baseline": {
+            "approximate": base.approximate,
+            "note": base.note,
+            "infeasible": inviaveis,
+            "trips": [{"label": t.label,
+                       "stop_external_ids": list(t.stop_external_ids),
+                       "distance_km": round(t.distance_m / 1000, 1),
+                       "duration_h": round(t.duration_s / 3600, 2)}
+                      for t in trips],
+        },
         "routes": [route_payload(r) for r in solution.routes if r.steps],
         "unassigned": [{"stop_external_id": u.stop_external_id, "reason": u.reason}
                        for u in solution.unassigned],

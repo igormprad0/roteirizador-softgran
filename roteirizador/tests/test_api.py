@@ -265,12 +265,19 @@ def test_baseline_reflete_so_as_paradas_atendidas_quando_frota_nao_cobre_o_dia()
 
 @pytest.mark.erp
 @pytest.mark.slow
-def test_optimize_entrega_posterior_baseline_nao_e_aproximado():
-    """Ao contrário de locação, o ERP de entrega posterior registra veículo e
-    ordem de rota reais -- o baseline aqui é medido, não uma partição por
-    ordem de lançamento. `approximate` precisa vir False e `note` vazia,
-    senão a ressalva de locação vira boilerplate que aparece nos dois perfis
-    e deixa de significar algo."""
+def test_optimize_entrega_posterior_nao_e_aproximado_quando_o_baseline_e_factivel():
+    """`approximate=False` só pode ser afirmado quando TODA viagem do
+    baseline poderia ter sido executada -- não por o perfil ser entrega
+    posterior.
+
+    A versão anterior deste teste travava a afirmação errada: `approximate`
+    vinha de `profile is Profile.LOCACAO`, então entrega posterior saía
+    sempre False. No dia de pico isso publicou "77% de economia,
+    approximate=False" contra uma volta contínua de 125 paradas / 31,6 h de
+    uma caixa de despacho do ERP ("ENTREGA DUVIDOSA / BAIXA DV") que nunca
+    foi caminhão nenhum. Agora o teste exige as duas coisas juntas: nenhuma
+    viagem inviável E `approximate` False -- se a viabilidade cair, o
+    esperado é a RESSALVA aparecer, não o número continuar limpo."""
     client.put("/api/depot", json={"profile": "entrega_posterior", "depot": {
         "label": "Matriz", "lon": -54.8060, "lat": -22.2210,
         "address": "Rua Ponta Porã, 1343"}})
@@ -283,8 +290,25 @@ def test_optimize_entrega_posterior_baseline_nao_e_aproximado():
                                            "date": DIA_EP, "mode": "replanejar"})
     assert r.status_code == 200
     body = r.json()
-    assert body["comparison"]["approximate"] is False
-    assert body["comparison"]["note"] == ""
+    base = body["baseline"]
+
+    # 1. Toda viagem do baseline tem de ser executável. Isto é o invariante,
+    #    e vale independentemente de o dia ter ou não veículo registrado.
+    assert base["infeasible"] == [], base["infeasible"]
+
+    # 2. `approximate` acompanha a RECONSTRUÇÃO, não o perfil: é False
+    #    exatamente quando cada parada foi medida no caminhão que o ERP
+    #    registrou (nenhuma viagem "Sem veículo registrado", nenhuma
+    #    quebrada por capacidade). Quando não for, a ressalva tem de estar
+    #    escrita -- silêncio é o que produziu os 77% do dia de pico.
+    reconstruido = any("Sem veículo registrado" in t["label"] or "viagem" in t["label"]
+                       for t in base["trips"])
+    assert base["approximate"] is reconstruido, base["note"]
+    assert body["comparison"]["approximate"] is base["approximate"]
+    if base["approximate"]:
+        assert base["note"], "baseline reconstruído sem ressalva nenhuma"
+    else:
+        assert body["comparison"]["note"] == ""
 
 
 @pytest.mark.erp
