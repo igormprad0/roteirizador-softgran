@@ -2384,11 +2384,14 @@ def test_teto_de_coletas_e_reportado_nao_engolido():
 
 @pytest.mark.erp
 def test_dropped_pickups_reseta_entre_fetches():
+    """Teto 20: a fila de vencidas (300+) estoura, as 12 devoluções do dia não.
+    Se `dropped_pickups` não fosse recalculado a cada fetch, o segundo assert
+    veria o resto do primeiro."""
     with connect(Profile.LOCACAO) as c:
-        src = LocacaoSource(c, overdue_days=1, max_pickups=5)
+        src = LocacaoSource(c, overdue_days=1, max_pickups=20)
         src.fetch(DIA, ImportMode.PRODUCAO)
         assert src.dropped_pickups > 0
-        src.fetch(DIA, ImportMode.REPLANEJAR)      # 12 coletas, cabe no teto
+        src.fetch(DIA, ImportMode.REPLANEJAR)      # 12 coletas <= teto de 20
         assert src.dropped_pickups == 0
 
 
