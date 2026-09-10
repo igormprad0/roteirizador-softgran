@@ -145,3 +145,19 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
     }
     payload["run_id"] = st.save_run(profile, target_date.isoformat(), payload)
     return payload
+
+
+def get_run(run_id: int) -> dict | None:
+    """Dono canônico de "o que é o run_id de uma execução salva" -- em vez de
+    remendar isso na borda HTTP (main.py). `LocalStore.save_run` grava o
+    payload_json ANTES de o próprio id existir (só existe depois do INSERT em
+    `optimize()` acima), então o JSON persistido nunca traz a chave
+    "run_id" -- só o dict devolvido por `optimize()` a tem, por já estar em
+    memória quando é atribuída. `LocalStore.get_run` devolve "id" (a mesma
+    coisa, vinda da linha). Completar aqui, e não em cada chamador, evita
+    remendo espalhado; um `db/local.py` com suporte a update seria a correção
+    completa, mas está fora do escopo deste arquivo."""
+    run = store().get_run(run_id)
+    if run is not None:
+        run.setdefault("run_id", run["id"])
+    return run

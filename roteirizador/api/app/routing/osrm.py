@@ -42,7 +42,16 @@ class OsrmClient:
         return ";".join([str(self._max_snap_m)] * n)
 
     def _get(self, path: str, params: dict) -> dict:
-        r = self._http.get(f"{self._base}{path}", params=params)
+        try:
+            r = self._http.get(f"{self._base}{path}", params=params)
+        except httpx.HTTPError as exc:
+            # httpx só embrulha falhas de STATUS (>=400) abaixo -- erros de
+            # TRANSPORTE (conexão recusada, timeout, DNS) escapavam crus daqui
+            # e viravam um 500 com stack trace em /api/optimize. OSRM parado,
+            # reiniciando ou com a porta errada é a falha operacional mais
+            # provável deste stack; precisa virar o mesmo OsrmError que o
+            # resto do código já sabe converter num erro limpo para a UI.
+            raise OsrmError(f"falha ao conectar ao OSRM ({self._base}): {exc}") from exc
         if r.status_code >= 400:
             raise OsrmError(f"OSRM {r.status_code}: {r.text[:200]}")
         body = r.json()

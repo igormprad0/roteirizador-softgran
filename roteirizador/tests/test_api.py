@@ -212,5 +212,73 @@ def test_baseline_reflete_so_as_paradas_atendidas_quando_frota_nao_cobre_o_dia()
     assert totals["stops_served"] + totals["stops_unassigned"] == totals["stops_total"]
     assert len(body["unassigned"]) == totals["stops_unassigned"]
 
+    # Achado do revisor: comparar o baseline_km ARREDONDADO (compare()
+    # arredonda para 1 casa) contra o teto SEM arredondar passava mesmo com o
+    # bug reintroduzido -- 327.4 < 327.419 é verdade só por coincidência de
+    # arredondamento, mesmo quando os dois lados mediam as mesmas 38 paradas.
+    # Uma margem de metade do teto está bem longe do ruído de arredondamento
+    # e bem dentro da diferença real observada (327 vs 94 km, fator ~3.5): se
+    # o filtro por atendidas for removido, os dois lados voltam a ficar
+    # praticamente iguais e esta margem falha, como deve.
     teto = _baseline_km_sobre_todas_as_paradas("locacao", DIA_LOC)
-    assert body["comparison"]["baseline_km"] < teto
+    baseline_km = body["comparison"]["baseline_km"]
+    assert baseline_km < teto * 0.5, (
+        f"baseline_km={baseline_km} não está claramente abaixo do teto sobre "
+        f"todas as paradas ({teto:.1f}) -- o baseline pode estar medindo "
+        f"paradas não atendidas de novo")
+
+
+@pytest.mark.erp
+@pytest.mark.slow
+def test_optimize_entrega_posterior_baseline_nao_e_aproximado():
+    """Ao contrário de locação, o ERP de entrega posterior registra veículo e
+    ordem de rota reais -- o baseline aqui é medido, não uma partição por
+    ordem de lançamento. `approximate` precisa vir False e `note` vazia,
+    senão a ressalva de locação vira boilerplate que aparece nos dois perfis
+    e deixa de significar algo."""
+    client.put("/api/depot", json={"profile": "entrega_posterior", "depot": {
+        "label": "Matriz", "lon": -54.8060, "lat": -22.2210,
+        "address": "Rua Ponta Porã, 1343"}})
+    client.put("/api/fleet", json={"profile": "entrega_posterior", "fleet": [
+        {"id": "CAM1", "label": "Caminhão 1", "placa": "AEY2862",
+         "capacity": 12, "trips": 2, "shift_start_s": 25200,
+         "shift_end_s": 64800, "enabled": True, "erp_id_veiculo": 5}]})
+
+    r = client.post("/api/optimize", json={"profile": "entrega_posterior",
+                                           "date": DIA_EP, "mode": "replanejar"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["comparison"]["approximate"] is False
+    assert body["comparison"]["note"] == ""
+
+
+@pytest.mark.erp
+@pytest.mark.slow
+def test_optimize_com_osrm_inacessivel_da_erro_limpo(monkeypatch):
+    """OSRM parado, ainda subindo ou com a porta trocada é a falha
+    operacional mais provável deste stack -- container reiniciado no meio do
+    dia, por exemplo. A UI precisa mostrar "motor de rotas indisponível",
+    não uma stack trace de 500. Aponta OSRM_URL para uma porta morta e
+    confirma que /api/optimize devolve um erro limpo (502), não um 500."""
+    client.put("/api/depot", json={"profile": "locacao", "depot": {
+        "label": "Matriz", "lon": -54.8060, "lat": -22.2210,
+        "address": "Rua Ponta Porã, 1343"}})
+    client.put("/api/fleet", json={"profile": "locacao", "fleet": [
+        {"id": "MB", "label": "MB 1513", "placa": "KTD3645", "capacity": 2,
+         "trips": 6, "shift_start_s": 25200, "shift_end_s": 68400,
+         "enabled": True, "erp_id_veiculo": 2}]})
+
+    from api.app.config import get_settings
+    monkeypatch.setenv("OSRM_URL", "http://127.0.0.1:1")
+    get_settings.cache_clear()
+    try:
+        r = client.post("/api/optimize", json={"profile": "locacao", "date": DIA_LOC,
+                                               "mode": "replanejar"})
+    finally:
+        # Restaura ANTES do teardown do monkeypatch para não vazar a URL
+        # quebrada -- via cache -- para os demais testes deste módulo.
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+    assert r.status_code == 502
+    assert r.status_code != 500

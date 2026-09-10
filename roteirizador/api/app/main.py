@@ -161,15 +161,9 @@ def optimize(req: OptimizeRequest) -> dict:
 
 
 def _load_run(run_id: int) -> dict:
-    run = service.store().get_run(run_id)
+    run = service.get_run(run_id)
     if run is None:
         raise HTTPException(404, "execução não encontrada")
-    # service.optimize() serializa o payload ANTES de saber o próprio run_id
-    # (o id só existe depois do INSERT), então o JSON persistido nunca traz
-    # essa chave — só o dict devolvido por /api/optimize a tem. LocalStore.get_run
-    # já devolve "id" (o id da linha, que é o mesmo run_id); completar aqui
-    # mantém o contrato "mesmo payload de /api/optimize" sem tocar em db/local.py.
-    run.setdefault("run_id", run["id"])
     return run
 
 

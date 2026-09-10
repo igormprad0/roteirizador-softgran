@@ -79,3 +79,14 @@ def test_ponto_rural_distante_ainda_e_aceito(client):
 def test_table_tambem_respeita_o_limite_de_snap(client):
     with pytest.raises(OsrmError):
         client.table([CENTRO, (-30.0, -30.0)])
+
+
+def test_falha_de_transporte_vira_osrm_error():
+    """Container do OSRM parado, ainda subindo ou porta errada -- a falha
+    operacional mais provável deste stack. Antes desta correção, `_get` só
+    convertia falhas de STATUS HTTP (>=400) em OsrmError; uma falha de
+    TRANSPORTE (conexão recusada aqui) subia como httpx.ConnectError cru.
+    Não depende dos containers reais -- roda sempre, sem marcador."""
+    c = OsrmClient("http://127.0.0.1:1", timeout=2.0)
+    with pytest.raises(OsrmError):
+        c.route([CENTRO, MARCELINO])
