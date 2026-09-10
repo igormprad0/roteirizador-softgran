@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 
 from ..models import Depot, Solution, Stop, VehicleConfig
-from .osrm import OsrmClient, OsrmError
+from .osrm import OsrmClient
 from .vroom import build_payload, expand_trips, parse_solution
 
 
@@ -48,20 +48,22 @@ class Optimizer:
         # geometria real da sequência já decidida no mesmo OSRM /route que o
         # baseline usa — isso também nos dá a distância e a duração de
         # deslocamento reais, no mesmo motor e nos mesmos termos do baseline.
+        #
+        # Por isso essa chamada NÃO é mais cosmética, e não capturamos nada
+        # aqui: uma rota cuja distância não pôde ser medida não pode ser
+        # contada como 0 m — isso subestimaria o total do otimizado e
+        # inflaria a economia reportada, o pior sentido possível de errar
+        # num número que existe para convencer um cliente cético. Se o OSRM
+        # falhar, a exceção sobe e o solve() inteiro falha alto, exatamente
+        # como measure_baseline já faz (ela também não tem try/except em
+        # torno de osrm.route) — os dois lados se comportam da mesma forma.
         por_ext = {s.external_id: s for s in stops}
         for route in solution.routes:
             if not route.steps:
                 continue
             coords = [depot.coord] + [(s.lon, s.lat) for s in route.steps] \
                 + [depot.coord]
-            try:
-                geo = self._osrm.route(coords)
-            except (OsrmError, httpx.HTTPError):
-                # Geometria (e a distância/duração que vêm da mesma chamada)
-                # são cosméticas para a validade da solução: sem elas o mapa
-                # desenha só os pinos, mas a rota continua válida. Erros fora
-                # desses dois tipos sobem — são bugs.
-                continue
+            geo = self._osrm.route(coords)
             route.geometry = geo.polyline
             route.distance_m = geo.distance_m
             route.duration_s = geo.duration_s + sum(

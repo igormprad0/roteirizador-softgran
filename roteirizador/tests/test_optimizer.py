@@ -92,3 +92,22 @@ def test_frota_vazia_levanta_erro(opt):
     stops = [_stop(0, *PONTOS[0])]
     with pytest.raises(VroomError):
         opt.solve(stops, [], DEPOT)
+
+
+class _OsrmQuebrado:
+    """Simula uma falha do motor de mapas ao medir a rota já decidida pelo
+    VROOM — de um tipo que não é OsrmError nem httpx.HTTPError, para provar
+    que _fill_geometry não engole nada: uma rota que não pôde ser medida
+    nunca pode virar 0 m (isso subestimaria o total e infla a economia
+    reportada)."""
+    def route(self, coords):
+        raise ValueError("motor de mapas fora do ar")
+
+
+@pytest.mark.stack
+def test_falha_ao_medir_rota_nao_e_engolida_como_zero():
+    stops = [_stop(i, lon, lat) for i, (lon, lat) in enumerate(PONTOS[:2])]
+    fleet = [VehicleConfig(id="A", label="A", capacity=10)]
+    quebrado = Optimizer(VROOM, _OsrmQuebrado())
+    with pytest.raises(ValueError):
+        quebrado.solve(stops, fleet, DEPOT)
