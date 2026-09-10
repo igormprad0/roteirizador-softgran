@@ -1591,16 +1591,26 @@ def geo(tmp_path):
         lon REAL, lat REAL);
       CREATE TABLE place (kind TEXT, name_norm TEXT, city_norm TEXT, lon REAL, lat REAL);
     """)
+    # city_norm dos ways vem VAZIO de propósito: no índice real só 55 de 55.063
+    # linhas têm addr:city. Um fixture que preenchesse isso testaria fantasia.
     c.execute("INSERT INTO street VALUES (1,'Rua Mato Grosso','RUA MATO GROSSO',"
-              "'DOURADOS',?,-54.81,-22.22,-54.80,-22.22)", (json.dumps(RUA_MG),))
-    c.execute("INSERT INTO street_fts VALUES ('RUA MATO GROSSO','DOURADOS',1)")
+              "'',?,-54.81,-22.22,-54.80,-22.22)", (json.dumps(RUA_MG),))
+    c.execute("INSERT INTO street_fts VALUES ('RUA MATO GROSSO','',1)")
+    # Marcelino Pires em dois segmentos distantes, como no índice real (20 lá).
     c.execute("INSERT INTO street VALUES (2,'Avenida Marcelino Pires',"
-              "'AVENIDA MARCELINO PIRES','DOURADOS','[[-54.82,-22.23],[-54.79,-22.23]]',"
+              "'AVENIDA MARCELINO PIRES','','[[-54.82,-22.23],[-54.79,-22.23]]',"
               "-54.82,-22.23,-54.79,-22.23)")
-    c.execute("INSERT INTO street_fts VALUES ('AVENIDA MARCELINO PIRES','DOURADOS',2)")
+    c.execute("INSERT INTO street_fts VALUES ('AVENIDA MARCELINO PIRES','',2)")
+    c.execute("INSERT INTO street VALUES (3,'Avenida Marcelino Pires',"
+              "'AVENIDA MARCELINO PIRES','','[[-54.83,-22.28],[-54.80,-22.28]]',"
+              "-54.83,-22.28,-54.80,-22.28)")
+    c.execute("INSERT INTO street_fts VALUES ('AVENIDA MARCELINO PIRES','',3)")
     c.execute("INSERT INTO housenumber VALUES ('RUA MATO GROSSO','DOURADOS','1973',"
               "-54.8055,-22.2205)")
+    c.execute("INSERT INTO housenumber VALUES ('RUA MATO GROSSO','DOURADOS','2500',"
+              "-54.8010,-22.2200)")
     c.execute("INSERT INTO place VALUES ('bairro','CENTRO','DOURADOS',-54.8090,-22.2210)")
+    c.execute("INSERT INTO place VALUES ('bairro','AGUA BOA','DOURADOS',-54.8150,-22.2800)")
     c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
     c.commit(); c.close()
 
@@ -1679,6 +1689,45 @@ def test_pin_manual_vence_o_cache_e_o_matching(geo):
 def test_endereco_vazio_nao_explode(geo):
     _, r = geo.geocode(_a(""))
     assert r.confidence in ("low", "failed")
+
+
+# ---- escolha de segmento e interpolação (§ dados reais da Task 5) ----------
+
+def test_escolhe_o_segmento_da_via_mais_perto_do_bairro(geo):
+    """A Marcelino Pires real são 20 segmentos somando 9,3 km. Pegar o errado
+    erra por quilômetros; o bairro é o que desempata."""
+    _, norte = geo.geocode(_a("AVENIDA MARCELINO PIRES", bairro="CENTRO"))
+    _, sul = geo.geocode(_a("AVENIDA MARCELINO PIRES", bairro="AGUA BOA"))
+    assert norte.lat == pytest.approx(-22.23)
+    assert sul.lat == pytest.approx(-22.28)
+
+
+def test_sem_bairro_conhecido_ancora_na_cidade(geo):
+    _, r = geo.geocode(_a("AVENIDA MARCELINO PIRES", bairro="BAIRRO INEXISTENTE"))
+    # centroide de DOURADOS é -22.2250, mais perto do segmento norte
+    assert r.lat == pytest.approx(-22.23)
+
+
+def test_usa_o_numero_conhecido_mais_proximo(geo):
+    """Sem o número exato, o vizinho mais próximo posiciona muito melhor que
+    o ponto médio — e MAX(number) não serve porque 94% das ruas não têm número."""
+    _, r = geo.geocode(_a("RUA MATO GROSSO, 2400"))
+    assert (r.lon, r.lat) == pytest.approx((-54.8010, -22.2200))   # vizinho 2500
+    _, perto_do_1973 = geo.geocode(_a("RUA MATO GROSSO, 1980"))
+    assert (perto_do_1973.lon, perto_do_1973.lat) == pytest.approx((-54.8055, -22.2205))
+
+
+def test_via_sem_nenhum_numero_cai_no_meio_do_segmento_escolhido(geo):
+    _, r = geo.geocode(_a("AVENIDA MARCELINO PIRES, 500", bairro="AGUA BOA"))
+    assert r.lat == pytest.approx(-22.28)      # segmento certo, não a via inteira
+
+
+def test_nao_usa_city_norm_do_way_para_filtrar(geo):
+    """city_norm dos ways está vazio no índice real; se o geocoder filtrasse
+    por ele, não acharia rua nenhuma."""
+    _, r = geo.geocode(_a("RUA MATO GROSSO, 1973", cidade="DOURADOS"))
+    assert r.confidence in ("high", "medium")
+    assert r.source != "cidade"
 ```
 
 - [ ] **Step 2: Rodar — deve falhar**
@@ -1688,7 +1737,24 @@ Expected: FAIL com `ModuleNotFoundError: No module named 'api.app.geo.geocoder'`
 
 - [ ] **Step 3: Implementar `api/app/geo/geocoder.py`**
 
-A interpolação por número é aproximada de propósito: sem `addr:interpolation` confiável no Brasil, posicionar o ponto na fração `number / max_number_da_via` do comprimento da via erra por uma quadra no pior caso — irrelevante para ordenar uma rota, e muito melhor que jogar no centroide do bairro.
+### O que o índice real da Task 5 obrigou a mudar aqui
+
+O plano original desta task presumia dados que não existem. Medições sobre o `streets.db` construído:
+
+| medida | valor real | consequência |
+|---|---|---|
+| `housenumber` em Dourados | **111** | o degrau `street_exact` quase nunca dispara |
+| ruas urbanas de Dourados com algum número | **~6%** | `MAX(number)` é `NULL` para ~94% das ruas |
+| `street.city_norm` preenchido | **55 de 55.063** | filtrar por `city_norm` é inútil — ways do OSM não têm `addr:city` |
+| segmentos da AV. MARCELINO PIRES | **20 ways, 9,3 km** | um "ponto médio da rua" erra por quilômetros |
+
+Três correções decorrem disso, e nenhuma é opcional:
+
+1. **Escopo de cidade por geometria, não por `city_norm`.** Filtrar por `city_norm` deixaria o geocoder casar uma rua homônima em Campo Grande. Em vez disso, pontuar os candidatos pela distância ao centroide da cidade, que vem da tabela `place`.
+2. **Escolha de segmento pelo bairro.** Uma rua é várias linhas de `street` com o mesmo `name_norm`. Escolher entre elas pelo centroide do bairro — quando o ERP informa bairro — troca um erro de 9,3 km por um de algumas centenas de metros. É a mudança de maior impacto nesta task.
+3. **Interpolação só quando há dado.** Havendo números na via, usar o **mais próximo** do procurado em vez de `number/MAX`. Não havendo, ir ao ponto médio **do segmento escolhido**, não da rua inteira.
+
+Nada disso conserta a esparsidade do OSM — conserta o comportamento diante dela. Uma parada com a rua certa e posição aproximada dentro dela ordena uma rota corretamente; uma parada a 5 km inverte a sequência.
 
 ```python
 from __future__ import annotations
@@ -1741,13 +1807,27 @@ class Geocoder:
         return self._store.pin_geocode(address_key, lon, lat)
 
     # ------------------------------------------------------------------
+    # -- âncoras geográficas -------------------------------------------
+    def _place(self, con, kind: str, name_norm: str) -> tuple[float, float] | None:
+        r = con.execute(
+            "SELECT lon, lat FROM place WHERE kind = ? AND name_norm = ? LIMIT 1",
+            (kind, name_norm)).fetchone()
+        return (r["lon"], r["lat"]) if r else None
+
+    @staticmethod
+    def _dist2(a: tuple[float, float], b: tuple[float, float]) -> float:
+        """Distância ao quadrado em graus. Só serve para ordenar candidatos —
+        não converter para metros, a escala de lon/lat difere."""
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
     def _by_housenumber(self, con, n: NormalizedAddress) -> GeoResult | None:
+        """Casamento exato de número. Raro em Dourados (111 números no índice
+        inteiro), mas quando acerta é a melhor posição que existe."""
         if not n.number or not n.street:
             return None
         r = con.execute(
-            "SELECT lon, lat FROM housenumber"
-            " WHERE street_norm = ? AND number = ? AND (city_norm = ? OR city_norm = '')"
-            " LIMIT 1", (n.street, n.number, n.city)).fetchone()
+            "SELECT lon, lat FROM housenumber WHERE street_norm = ? AND number = ?"
+            " LIMIT 1", (n.street, n.number)).fetchone()
         if r is None:
             return None
         return GeoResult(r["lon"], r["lat"], "high", "street_exact", n.street, 100.0)
@@ -1767,17 +1847,26 @@ class Geocoder:
             f"SELECT * FROM street WHERE street_id IN ({marks})", ids).fetchall()
 
     def _by_street(self, con, n: NormalizedAddress) -> GeoResult | None:
+        """Casa o nome da via, escolhe entre os segmentos homônimos pelo bairro
+        (ou pela cidade), e só então posiciona o ponto dentro do segmento."""
         if not n.street:
             return None
         rows = self._candidates(con, n)
         if not rows:
             return None
-        by_name = {r["name_norm"]: r for r in rows}
-        best = process.extractOne(n.street, list(by_name), scorer=fuzz.WRatio)
+
+        nomes = {r["name_norm"] for r in rows}
+        best = process.extractOne(n.street, list(nomes), scorer=fuzz.WRatio)
         if best is None or best[1] < self._lo:
             return None
-        name, score = best[0], best[1]
-        row = by_name[name]
+        name, score = best[0], float(best[1])
+
+        segmentos = [r for r in rows if r["name_norm"] == name]
+        # Âncora: bairro se o ERP informou e o índice conhece, senão a cidade.
+        # `street.city_norm` NÃO serve — está vazio em 99,9% das linhas.
+        ancora = (self._place(con, "bairro", n.bairro) if n.bairro else None) \
+            or self._place(con, "cidade", n.city)
+        row = self._pick_segment(segmentos, ancora)
         pts = json.loads(row["coords_json"])
 
         if score >= self._hi and n.street == name:
@@ -1790,23 +1879,44 @@ class Geocoder:
             confidence, source = "medium", "street_mid"
 
         lon, lat = self._point_on_street(con, pts, name, n)
-        return GeoResult(lon, lat, confidence, source, name, float(score))
+        return GeoResult(lon, lat, confidence, source, name, score)
+
+    @staticmethod
+    def _pick_segment(segmentos: list, ancora: tuple[float, float] | None):
+        """Uma via é várias linhas de `street`. A Marcelino Pires são 20
+        segmentos somando 9,3 km — escolher o errado erra por quilômetros."""
+        if len(segmentos) == 1 or ancora is None:
+            return segmentos[0]
+        def centro(r):
+            return ((r["min_lon"] + r["max_lon"]) / 2,
+                    (r["min_lat"] + r["max_lat"]) / 2)
+        return min(segmentos, key=lambda r: Geocoder._dist2(centro(r), ancora))
 
     def _point_on_street(self, con, pts, name_norm: str,
                          n: NormalizedAddress) -> tuple[float, float]:
-        """Sem número: ponto médio. Com número: fração number/max_number da via."""
+        """Com número e com vizinhos conhecidos: usa o número mais próximo.
+        Sem dado de número: ponto médio DO SEGMENTO escolhido, não da via."""
+        meio = tuple(pts[len(pts) // 2])
         if not n.number:
-            return tuple(pts[len(pts) // 2])
-        r = con.execute(
-            "SELECT MAX(CAST(number AS INTEGER)) AS mx FROM housenumber"
-            " WHERE street_norm = ?", (name_norm,)).fetchone()
-        mx = (r["mx"] or 0) if r else 0
+            return meio
         try:
-            frac = min(max(int(n.number) / mx, 0.0), 1.0) if mx > 0 else 0.5
+            alvo = int(n.number)
         except ValueError:
-            frac = 0.5
-        i = min(int(frac * (len(pts) - 1)), len(pts) - 1)
-        return tuple(pts[i])
+            return meio
+
+        vizinhos = con.execute(
+            "SELECT number, lon, lat FROM housenumber WHERE street_norm = ?",
+            (name_norm,)).fetchall()
+        candidatos = []
+        for v in vizinhos:
+            try:
+                candidatos.append((abs(int(v["number"]) - alvo), v["lon"], v["lat"]))
+            except (TypeError, ValueError):
+                continue
+        if candidatos:
+            _, lon, lat = min(candidatos, key=lambda c: c[0])
+            return (lon, lat)
+        return meio
 
     def _by_bairro(self, con, n: NormalizedAddress) -> GeoResult | None:
         if not n.bairro:
@@ -1830,9 +1940,43 @@ class Geocoder:
 - [ ] **Step 4: Rodar os testes**
 
 Run: `docker compose run --rm api pytest tests/test_geocoder.py -v`
-Expected: 10 passed
+Expected: 15 passed
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Medir a taxa real contra as duas bases**
+
+Os testes provam o comportamento; este passo mede se ele resolve o problema. Rodar sobre um dia real de cada cliente e registrar a distribuição de confiança — é o número do critério de sucesso nº 2 (≥ 70% em `high`+`medium`).
+
+```bash
+docker compose run --rm api python -c "
+from datetime import date
+from pathlib import Path
+from api.app.db.firebird import connect
+from api.app.db.local import LocalStore
+from api.app.erp.base import build_source
+from api.app.config import ImportMode, Profile
+from api.app.geo.geocoder import Geocoder
+from collections import Counter
+
+store = LocalStore(Path('/srv/data/local.db')); store.init_schema()
+geo = Geocoder(Path('/srv/data/streets.db'), store)
+for perfil, dia in [(Profile.LOCACAO, date(2026,8,4)),
+                    (Profile.ENTREGA_POSTERIOR, date(2026,8,13))]:
+    with connect(perfil) as c:
+        paradas = build_source(perfil, c).fetch(dia, ImportMode.REPLANEJAR)
+    conf, src = Counter(), Counter()
+    for s in paradas:
+        _, g = geo.geocode(s.address)
+        conf[g.confidence] += 1; src[g.source] += 1
+    bons = conf['high'] + conf['medium']
+    print(perfil.value, len(paradas), 'paradas |', dict(conf), '|', dict(src),
+          '| high+medium =', f'{bons}/{len(paradas)}',
+          f'({bons/max(len(paradas),1):.0%})')
+"
+```
+
+Reportar os números como saíram. Se ficar abaixo de 70%, **não relaxar o critério** — listar os endereços que caíram em `low`/`failed` e dizer o que neles derrotou a cascata. Esse diagnóstico vale mais que um número maquiado, porque decide se o próximo passo é melhorar `normalize.py`, o índice, ou a UI de correção manual.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add api/app/geo/geocoder.py tests/test_geocoder.py
