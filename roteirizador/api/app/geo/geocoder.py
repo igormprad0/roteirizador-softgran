@@ -18,15 +18,36 @@ _FTS_SAFE = re.compile(r"[^A-Z0-9 ]")
 # NENHUM" casava com "RUA MATO GROSSO" via WRatio=85 só por causa do "RUA"
 # compartilhado). Continuam fazendo parte de `name_norm`/`n.street` para o
 # score fuzzy — só não valem como termo de recuperação de candidatos.
+#
+# NÃO é tudo-ou-nada: "RUA 6", "RUA 8", "ALAMEDA 1".."9" e "RUA MARGINAL CD
+# 01" são convenção corrente de loteamento brasileiro e, depois de tirar
+# essas palavras, o conjunto de termos fica vazio (ou perde o único token que
+# sobrou, ex. "MARGINAL" está na própria lista). Quando isso acontece,
+# `_candidates` cai de volta para os termos originais (sem o filtro) em vez
+# de devolver zero candidatos.
 _TIPO_VIA = {"RUA", "AVENIDA", "RODOVIA", "ALAMEDA", "TRAVESSA", "PRACA",
              "ESTRADA", "LARGO", "MARGINAL"}
 
 # Diferença máxima (em número de porta) para confiar no vizinho conhecido
-# mais próximo como posição. Quarteirões urbanos em Dourados avançam em
-# dezenas por lote; um vizinho a mais de 200 números de distância pode estar
-# em outro trecho da via e a extrapolação vira um chute. Acima disso, cai no
-# meio do segmento escolhido em vez de arriscar uma posição inventada.
+# mais próximo como posição, ao interpolar dentro de UMA MESMA cidade.
+# Quarteirões urbanos avançam em dezenas por lote; um vizinho a mais de 200
+# números pode estar num trecho distante da mesma via (a Marcelino Pires,
+# por exemplo, soma 9,3 km em segmentos separados) e a extrapolação vira um
+# chute. Isto é ortogonal ao escopo de cidade abaixo: mesmo depois de garantir
+# que o vizinho está na cidade certa, ele pode estar no lado errado da cidade.
 _NUMBER_MAX_GAP = 200
+
+# Raio (em graus, não metros — a escala de lon/lat difere) além do qual um
+# candidato é recusado por implausível para a cidade do endereço. ~0.30°
+# nesta latitude cobre um município com folga e recusa a cidade vizinha.
+# Existe porque, sem ele, quatro consultas (housenumber exato, vizinho mais
+# próximo para interpolação, bairro e a âncora de bairro usada para escolher
+# segmento de via) varriam o extrato inteiro sem nenhuma discriminação
+# geográfica — o achado real foi "RUA MATO GROSSO, 1973" em Dourados
+# resolvendo a 145 km, e um bairro "CENTRO" (existe em 10 municípios do
+# extrato) puxando o centroide de outra cidade para dentro do cálculo de
+# segmento.
+CITY_RADIUS_DEG = 0.30
 
 
 class Geocoder:
@@ -48,9 +69,13 @@ class Geocoder:
         con = sqlite3.connect(self._db)
         con.row_factory = sqlite3.Row
         try:
-            result = (self._by_housenumber(con, n)
-                      or self._by_street(con, n)
-                      or self._by_bairro(con, n)
+            # Resolvido uma única vez por geocode() e repassado a toda
+            # consulta que precise de escopo geográfico — inclusive à que
+            # alimenta o cascata de bairro/segmento abaixo.
+            city_centro = self._place(con, "cidade", n.city)
+            result = (self._by_housenumber(con, n, city_centro)
+                      or self._by_street(con, n, city_centro)
+                      or self._by_bairro(con, n, city_centro)
                       or self._by_cidade(con, n)
                       or GeoResult(0.0, 0.0, "failed", "none"))
         finally:
@@ -66,10 +91,38 @@ class Geocoder:
     # ------------------------------------------------------------------
     # -- âncoras geográficas -------------------------------------------
     def _place(self, con, kind: str, name_norm: str) -> tuple[float, float] | None:
+        """Busca sem escopo — só serve para resolver a própria cidade, que
+        não tem contra o que se desambiguar. Nomes de bairro usam
+        `_place_scoped`, que existe exatamente porque isto sozinho não
+        discrimina município (`place.city_norm` para bairro está preenchido
+        em 1 de 1.388 linhas — inútil)."""
         r = con.execute(
             "SELECT lon, lat FROM place WHERE kind = ? AND name_norm = ? LIMIT 1",
             (kind, name_norm)).fetchone()
         return (r["lon"], r["lat"]) if r else None
+
+    def _place_scoped(self, con, kind: str, name_norm: str,
+                       city_centro: tuple[float, float] | None
+                       ) -> tuple[float, float] | None:
+        """Como `_place`, mas descarta candidatos a mais de `CITY_RADIUS_DEG`
+        do centroide da cidade e fica com o mais próximo entre os que
+        sobram. Necessário para bairro: mesmo nome existe em vários
+        municípios do extrato (`CENTRO` em 10) e não há `city_norm`
+        utilizável para filtrar antes."""
+        rows = con.execute(
+            "SELECT lon, lat FROM place WHERE kind = ? AND name_norm = ?",
+            (kind, name_norm)).fetchall()
+        if not rows:
+            return None
+        if city_centro is None:
+            r = rows[0]
+            return (r["lon"], r["lat"])
+        candidatos = [(r["lon"], r["lat"]) for r in rows
+                      if self._dist2((r["lon"], r["lat"]), city_centro)
+                      <= CITY_RADIUS_DEG ** 2]
+        if not candidatos:
+            return None
+        return min(candidatos, key=lambda p: self._dist2(p, city_centro))
 
     @staticmethod
     def _dist2(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -77,21 +130,45 @@ class Geocoder:
         não converter para metros, a escala de lon/lat difere."""
         return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
-    def _by_housenumber(self, con, n: NormalizedAddress) -> GeoResult | None:
+    def _by_housenumber(self, con, n: NormalizedAddress,
+                        city_centro: tuple[float, float] | None) -> GeoResult | None:
         """Casamento exato de número. Raro em Dourados (111 números no índice
-        inteiro), mas quando acerta é a melhor posição que existe."""
+        inteiro), mas quando acerta é a melhor posição que existe.
+
+        `housenumber.city_norm` está 64% preenchido (1.299 de 2.027) — ao
+        contrário do de `street`, é utilizável. Tenta cidade exata primeiro;
+        só recorre ao critério geométrico (candidato mais próximo do
+        centroide, dentro de `CITY_RADIUS_DEG`) quando não há linha com
+        `city_norm` batendo — o que cobre tanto os 36% sem `city_norm`
+        quanto o caso de o ERP citar uma cidade que o índice grafa diferente.
+        """
         if not n.number or not n.street:
             return None
-        r = con.execute(
-            "SELECT lon, lat FROM housenumber WHERE street_norm = ? AND number = ?"
-            " LIMIT 1", (n.street, n.number)).fetchone()
-        if r is None:
+        exato = con.execute(
+            "SELECT lon, lat FROM housenumber"
+            " WHERE street_norm = ? AND number = ? AND city_norm = ? LIMIT 1",
+            (n.street, n.number, n.city)).fetchone()
+        if exato is not None:
+            return GeoResult(exato["lon"], exato["lat"], "high", "street_exact",
+                             n.street, 100.0)
+        if city_centro is None:
             return None
-        return GeoResult(r["lon"], r["lat"], "high", "street_exact", n.street, 100.0)
+        candidatos = [
+            (r["lon"], r["lat"]) for r in con.execute(
+                "SELECT lon, lat FROM housenumber WHERE street_norm = ? AND number = ?",
+                (n.street, n.number))
+            if self._dist2((r["lon"], r["lat"]), city_centro) <= CITY_RADIUS_DEG ** 2
+        ]
+        if not candidatos:
+            return None
+        lon, lat = min(candidatos, key=lambda p: self._dist2(p, city_centro))
+        return GeoResult(lon, lat, "high", "street_exact", n.street, 100.0)
 
     def _candidates(self, con, n: NormalizedAddress) -> list[sqlite3.Row]:
-        terms = [t for t in _FTS_SAFE.sub(" ", n.street).split()
-                 if len(t) > 2 and t not in _TIPO_VIA]
+        tokens = [t for t in _FTS_SAFE.sub(" ", n.street).split() if len(t) > 2]
+        terms = [t for t in tokens if t not in _TIPO_VIA]
+        if not terms:
+            terms = tokens
         if not terms:
             return []
         query = " OR ".join(terms)
@@ -104,7 +181,8 @@ class Geocoder:
         return con.execute(
             f"SELECT * FROM street WHERE street_id IN ({marks})", ids).fetchall()
 
-    def _by_street(self, con, n: NormalizedAddress) -> GeoResult | None:
+    def _by_street(self, con, n: NormalizedAddress,
+                   city_centro: tuple[float, float] | None) -> GeoResult | None:
         """Casa o nome da via, escolhe entre os segmentos homônimos pelo bairro
         (ou pela cidade), e só então posiciona o ponto dentro do segmento."""
         if not n.street:
@@ -120,10 +198,13 @@ class Geocoder:
         name, score = best[0], float(best[1])
 
         segmentos = [r for r in rows if r["name_norm"] == name]
-        # Âncora: bairro se o ERP informou e o índice conhece, senão a cidade.
+        # Âncora: bairro se o ERP informou e o índice conhece (já escopado
+        # por cidade via `_place_scoped` — precisa ser resolvido ANTES de
+        # virar âncora, senão um "CENTRO" de outro município arrasta a
+        # escolha de segmento inteira para lá), senão o centroide da cidade.
         # `street.city_norm` NÃO serve — está vazio em 99,9% das linhas.
-        ancora = (self._place(con, "bairro", n.bairro) if n.bairro else None) \
-            or self._place(con, "cidade", n.city)
+        ancora = (self._place_scoped(con, "bairro", n.bairro, city_centro)
+                 if n.bairro else None) or city_centro
         row = self._pick_segment(segmentos, ancora)
         pts = json.loads(row["coords_json"])
 
@@ -134,9 +215,22 @@ class Geocoder:
         elif n.number:
             confidence, source = "medium", "street_fuzzy"
         else:
-            confidence, source = "medium", "street_mid"
+            # Nem o nome da via é confiável (score < fuzzy_high) nem há
+            # número para interpolar — o degrau mais fraco dos três "medium"
+            # desta função, não um distinto/mais forte. Rebaixado para
+            # "low": contar isto junto dos outros dois inflaria o
+            # high+medium com o pior palpite da cascata.
+            confidence, source = "low", "street_mid"
 
-        lon, lat = self._point_on_street(con, pts, name, n)
+        lon, lat = self._point_on_street(con, pts, name, n, city_centro)
+
+        if city_centro is not None and \
+                self._dist2((lon, lat), city_centro) > CITY_RADIUS_DEG ** 2:
+            # O nome bateu em algum lugar, mas nenhum segmento com esse nome
+            # está perto o bastante da cidade do endereço — não é um "match"
+            # utilizável. Deixa a cascata cair para bairro/cidade.
+            return None
+
         return GeoResult(lon, lat, confidence, source, name, score)
 
     @staticmethod
@@ -151,10 +245,15 @@ class Geocoder:
                     (r["min_lat"] + r["max_lat"]) / 2)
         return min(segmentos, key=lambda r: Geocoder._dist2(centro(r), ancora))
 
-    def _point_on_street(self, con, pts, name_norm: str,
-                         n: NormalizedAddress) -> tuple[float, float]:
-        """Com número e com vizinhos conhecidos: usa o número mais próximo.
-        Sem dado de número: ponto médio DO SEGMENTO escolhido, não da via."""
+    def _point_on_street(self, con, pts, name_norm: str, n: NormalizedAddress,
+                         city_centro: tuple[float, float] | None
+                         ) -> tuple[float, float]:
+        """Com número e com vizinhos conhecidos: usa o número mais próximo,
+        restrito a vizinhos plausíveis para a cidade do endereço (mesma
+        lógica de `_by_housenumber`: `city_norm` exato primeiro, geometria
+        como reserva) e dentro de `_NUMBER_MAX_GAP`. Sem dado de número ou
+        sem vizinho que passe nos dois filtros: ponto médio DO SEGMENTO
+        escolhido, não da via."""
         meio = tuple(pts[len(pts) // 2])
         if not n.number:
             return meio
@@ -164,29 +263,36 @@ class Geocoder:
             return meio
 
         vizinhos = con.execute(
-            "SELECT number, lon, lat FROM housenumber WHERE street_norm = ?",
+            "SELECT number, lon, lat, city_norm FROM housenumber WHERE street_norm = ?",
             (name_norm,)).fetchall()
         candidatos = []
         for v in vizinhos:
             try:
-                candidatos.append((abs(int(v["number"]) - alvo), v["lon"], v["lat"]))
+                gap = abs(int(v["number"]) - alvo)
             except (TypeError, ValueError):
                 continue
+            if gap > _NUMBER_MAX_GAP:
+                continue
+            mesma_cidade = v["city_norm"] and v["city_norm"] == n.city
+            if not mesma_cidade:
+                if city_centro is None:
+                    continue
+                if self._dist2((v["lon"], v["lat"]), city_centro) > CITY_RADIUS_DEG ** 2:
+                    continue
+            candidatos.append((gap, v["lon"], v["lat"]))
         if candidatos:
-            gap, lon, lat = min(candidatos, key=lambda c: c[0])
-            if gap <= _NUMBER_MAX_GAP:
-                return (lon, lat)
+            _, lon, lat = min(candidatos, key=lambda c: c[0])
+            return (lon, lat)
         return meio
 
-    def _by_bairro(self, con, n: NormalizedAddress) -> GeoResult | None:
+    def _by_bairro(self, con, n: NormalizedAddress,
+                   city_centro: tuple[float, float] | None) -> GeoResult | None:
         if not n.bairro:
             return None
-        r = con.execute(
-            "SELECT lon, lat FROM place WHERE kind = 'bairro' AND name_norm = ?"
-            " LIMIT 1", (n.bairro,)).fetchone()
-        if r is None:
+        pt = self._place_scoped(con, "bairro", n.bairro, city_centro)
+        if pt is None:
             return None
-        return GeoResult(r["lon"], r["lat"], "low", "bairro", n.bairro, 50.0)
+        return GeoResult(pt[0], pt[1], "low", "bairro", n.bairro, 50.0)
 
     def _by_cidade(self, con, n: NormalizedAddress) -> GeoResult | None:
         r = con.execute(

@@ -160,3 +160,82 @@ def test_nao_usa_city_norm_do_way_para_filtrar(geo):
     _, r = geo.geocode(_a("RUA MATO GROSSO, 1973", cidade="DOURADOS"))
     assert r.confidence in ("high", "medium")
     assert r.source != "cidade"
+
+
+# ---- escopo de cidade em TODA consulta -------------------------------------
+# O fixture abaixo replica as colisões reais do índice: mesmo nome de rua,
+# mesmo número de porta e mesmo nome de bairro existindo em outro município.
+
+@pytest.fixture
+def geo_colisao(tmp_path):
+    idx = tmp_path / "streets.db"
+    c = sqlite3.connect(idx)
+    c.executescript("""
+      CREATE TABLE street (street_id INTEGER PRIMARY KEY, name TEXT, name_norm TEXT,
+        city_norm TEXT, coords_json TEXT, min_lon REAL, min_lat REAL,
+        max_lon REAL, max_lat REAL);
+      CREATE VIRTUAL TABLE street_fts USING fts5(name_norm, city_norm,
+        street_id UNINDEXED, tokenize='unicode61');
+      CREATE TABLE housenumber (street_norm TEXT, city_norm TEXT, number TEXT,
+        lon REAL, lat REAL);
+      CREATE TABLE place (kind TEXT, name_norm TEXT, city_norm TEXT, lon REAL, lat REAL);
+    """)
+    # Mesma rua em Dourados (-54.81/-22.22) e em Campo Grande (-54.61/-20.46).
+    c.execute("INSERT INTO street VALUES (1,'Rua Mato Grosso','RUA MATO GROSSO','',"
+              "'[[-54.8100,-22.2200],[-54.8000,-22.2200]]',-54.81,-22.22,-54.80,-22.22)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA MATO GROSSO','',1)")
+    c.execute("INSERT INTO street VALUES (2,'Rua Mato Grosso','RUA MATO GROSSO','',"
+              "'[[-54.6100,-20.4600],[-54.6000,-20.4600]]',-54.61,-20.46,-54.60,-20.46)")
+    c.execute("INSERT INTO street_fts VALUES ('RUA MATO GROSSO','',2)")
+    # Rua numerada: todos os tokens são genéricos ou dígitos.
+    c.execute("INSERT INTO street VALUES (3,'Alameda 5','ALAMEDA 5','',"
+              "'[[-54.8300,-22.2400],[-54.8200,-22.2400]]',-54.83,-22.24,-54.82,-22.24)")
+    c.execute("INSERT INTO street_fts VALUES ('ALAMEDA 5','',3)")
+    # Mesmo número de porta nas duas cidades; só o de CG tem city_norm.
+    c.execute("INSERT INTO housenumber VALUES ('RUA MATO GROSSO','DOURADOS','1973',"
+              "-54.8055,-22.2205)")
+    c.execute("INSERT INTO housenumber VALUES ('RUA MATO GROSSO','CAMPO GRANDE','1973',"
+              "-54.6055,-20.4605)")
+    # CENTRO existe nas duas; o de CG vem primeiro na varredura.
+    c.execute("INSERT INTO place VALUES ('bairro','CENTRO','',-54.6133,-20.4614)")
+    c.execute("INSERT INTO place VALUES ('bairro','CENTRO','',-54.8112,-22.2279)")
+    c.execute("INSERT INTO place VALUES ('cidade','DOURADOS','',-54.8050,-22.2250)")
+    c.execute("INSERT INTO place VALUES ('cidade','CAMPO GRANDE','',-54.6133,-20.4614)")
+    c.commit(); c.close()
+    store = LocalStore(tmp_path / "local.db"); store.init_schema()
+    return Geocoder(idx, store)
+
+
+def test_numero_de_porta_de_outra_cidade_nao_e_usado(geo_colisao):
+    """O caso real: 'RUA MATO GROSSO, 1973' em Dourados resolvia a 145 km."""
+    _, r = geo_colisao.geocode(_a("RUA MATO GROSSO, 1973", cidade="DOURADOS"))
+    assert r.lat == pytest.approx(-22.2205, abs=0.02)
+    assert r.lon == pytest.approx(-54.8055, abs=0.02)
+
+
+def test_bairro_homonimo_de_outra_cidade_nao_e_usado(geo_colisao):
+    """CENTRO existe em 10 municípios do extrato real."""
+    _, r = geo_colisao.geocode(_a("RUA QUE NAO EXISTE", cidade="DOURADOS",
+                                  bairro="CENTRO"))
+    assert r.source == "bairro"
+    assert r.lat == pytest.approx(-22.2279, abs=0.02)
+
+
+def test_segmento_de_outra_cidade_nao_e_escolhido(geo_colisao):
+    _, r = geo_colisao.geocode(_a("RUA MATO GROSSO", cidade="DOURADOS"))
+    assert r.lat == pytest.approx(-22.22, abs=0.05)
+
+
+def test_rua_numerada_continua_encontravel(geo_colisao):
+    """RUA 6, ALAMEDA 1..9 e afins são convenção de loteamento brasileiro.
+    O filtro de palavras genéricas não pode torná-las inencontráveis."""
+    _, r = geo_colisao.geocode(_a("ALAMEDA 5", cidade="DOURADOS"))
+    assert r.source in ("street_exact", "street_fuzzy", "street_mid")
+    assert r.lat == pytest.approx(-22.24, abs=0.02)
+
+
+def test_candidato_longe_demais_da_cidade_e_recusado(geo_colisao):
+    """Sem nada plausível perto, cai no centroide da cidade — não vai buscar
+    a 200 km e devolver `medium` como se tivesse acertado."""
+    _, r = geo_colisao.geocode(_a("RUA MATO GROSSO, 1973", cidade="CAMPO GRANDE"))
+    assert r.lat == pytest.approx(-20.46, abs=0.05)
