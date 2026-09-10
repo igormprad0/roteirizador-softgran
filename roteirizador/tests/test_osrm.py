@@ -51,6 +51,31 @@ def test_nearest_gruda_na_via(client):
 
 
 @pytest.mark.stack
-def test_coordenada_no_meio_do_oceano_levanta_erro(client):
+def test_coordenada_fora_da_malha_levanta_erro(client):
+    """Sem limite de snap o OSRM SEMPRE gruda no nó mais próximo do grafo, por
+    mais absurda que seja a coordenada. Um lon/lat invertido viraria uma rota
+    plausível e errada. O `radiuses` é o que transforma isso em erro alto."""
     with pytest.raises(OsrmError):
         client.route([(-30.0, -30.0), (-31.0, -31.0)])
+
+
+@pytest.mark.stack
+def test_lon_lat_invertido_e_recusado(client):
+    """Dourados com lon/lat trocados cai no Atlântico Sul. É o erro mais fácil
+    de cometer neste projeto e o mais caro — tem de estourar, não passar."""
+    with pytest.raises(OsrmError):
+        client.route([(-22.2210, -54.8060), (-22.2280, -54.8180)])
+
+
+@pytest.mark.stack
+def test_ponto_rural_distante_ainda_e_aceito(client):
+    """O limite de snap não pode ser tão apertado que recuse entrega em
+    chácara. ~12 km ao norte de Dourados, longe de via mapeada."""
+    r = client.route([CENTRO, (-54.8060, -22.1100)])
+    assert r.distance_m > 0
+
+
+@pytest.mark.stack
+def test_table_tambem_respeita_o_limite_de_snap(client):
+    with pytest.raises(OsrmError):
+        client.table([CENTRO, (-30.0, -30.0)])
