@@ -2292,27 +2292,54 @@ def test_traz_entregas_do_dia(src):
 
 
 @pytest.mark.erp
-def test_traz_coletas_de_locacoes_vencidas(src):
-    stops = src.fetch(DIA, ImportMode.REPLANEJAR)
-    coletas = [s for s in stops if s.kind == "pickup"]
-    assert len(coletas) > 0
-    assert all(s.days_overdue > 0 for s in coletas)
+def test_a_locacao_nao_tem_o_problema_da_base_historica(src):
+    """Diferente da entrega posterior, aqui PRODUCAO devolve dados: as
+    entregas vêm por DATA_LOCACAO, que não depende de nada estar pendente."""
+    assert len(src.fetch(DIA, ImportMode.PRODUCAO)) > 0
 
 
 @pytest.mark.erp
-def test_prioridade_cresce_com_o_atraso(src):
+def test_replanejar_traz_as_devolucoes_reais_do_dia(src):
+    """DATA_DEVOLUCAO é preenchida quando a coleta acontece, então num dia
+    histórico ela É a carga de coleta real. Em 2026-08-04: 26 entregas, 12
+    coletas — o caminhão sai cheio e volta cheio de verdade."""
+    stops = src.fetch(DIA, ImportMode.REPLANEJAR)
+    entregas = [s for s in stops if s.kind == "delivery"]
+    coletas = [s for s in stops if s.kind == "pickup"]
+    assert len(entregas) == 26
+    assert len(coletas) == 12
+    with connect(Profile.LOCACAO) as c:
+        esperadas = {f"LOC:{int(r['ID_SEQUENCIA'])}" for r in c.query(
+            "SELECT ID_SEQUENCIA FROM LOCACAO_PRODUTO WHERE DATA_DEVOLUCAO = ?",
+            (DIA,))}
+    assert {s.external_id for s in coletas} == esperadas
+
+
+@pytest.mark.erp
+def test_replanejar_nao_infla_prioridade_com_tempo_de_locacao(src):
+    """Em dia histórico, dias na rua não é atraso — não deve virar prioridade."""
     coletas = [s for s in src.fetch(DIA, ImportMode.REPLANEJAR) if s.kind == "pickup"]
-    mais_atrasada = max(coletas, key=lambda s: s.days_overdue)
-    menos_atrasada = min(coletas, key=lambda s: s.days_overdue)
-    assert mais_atrasada.priority >= menos_atrasada.priority
+    assert all(s.days_overdue == 0 for s in coletas)
     assert all(0 <= s.priority <= 100 for s in coletas)
 
 
 @pytest.mark.erp
-def test_nao_traz_locacao_ja_devolvida_como_coleta(src):
-    stops = src.fetch(DIA, ImportMode.REPLANEJAR)
-    ids = {s.external_id for s in stops if s.kind == "pickup"}
+def test_producao_traz_a_fila_de_vencidas_nao_as_devolvidas(src):
+    """Em produção a coleta é o backlog: segue em locação e passou do corte.
+    Em 2026-08-04 com 30 dias de corte são 4."""
     with connect(Profile.LOCACAO) as c:
+        coletas = [s for s in LocacaoSource(c, overdue_days=30)
+                   .fetch(DIA, ImportMode.PRODUCAO) if s.kind == "pickup"]
+    assert len(coletas) == 4
+    assert all(s.days_overdue > 30 for s in coletas)
+    assert all(s.priority > 0 for s in coletas)
+
+
+@pytest.mark.erp
+def test_producao_nunca_coleta_algo_ja_devolvido(src):
+    with connect(Profile.LOCACAO) as c:
+        ids = {s.external_id for s in LocacaoSource(c, overdue_days=30)
+               .fetch(DIA, ImportMode.PRODUCAO) if s.kind == "pickup"}
         devolvidas = {f"LOC:{int(r['ID_SEQUENCIA'])}" for r in c.query(
             "SELECT FIRST 500 ID_SEQUENCIA FROM LOCACAO_PRODUTO WHERE SITUACAO = 2")}
     assert not (ids & devolvidas)
@@ -2338,27 +2365,43 @@ def test_cai_no_cadastro_do_clifor_quando_endereco_entrega_esta_vazio(src):
 
 
 @pytest.mark.erp
-def test_teto_de_coletas_e_reportado_nao_engolido(src):
+def test_teto_de_coletas_e_reportado_nao_engolido():
+    """Com corte de 1 dia a fila de vencidas passa de 300 — é aí que o teto
+    entra. Com 30 dias são só 4 e ele nunca dispara, então o teste tem de usar
+    o corte curto, senão não testa nada."""
     with connect(Profile.LOCACAO) as c:
-        apertado = LocacaoSource(c, overdue_days=30, max_pickups=5)
-        stops = apertado.fetch(DIA, ImportMode.REPLANEJAR)
-        folgado = LocacaoSource(c, overdue_days=30, max_pickups=10_000)
-        todas = folgado.fetch(DIA, ImportMode.REPLANEJAR)
+        apertado = LocacaoSource(c, overdue_days=1, max_pickups=5)
+        stops = apertado.fetch(DIA, ImportMode.PRODUCAO)
+        folgado = LocacaoSource(c, overdue_days=1, max_pickups=10_000)
+        todas = folgado.fetch(DIA, ImportMode.PRODUCAO)
     n_apertado = len([s for s in stops if s.kind == "pickup"])
     n_todas = len([s for s in todas if s.kind == "pickup"])
+    assert n_todas > 100, "corte de 1 dia deveria render uma fila grande"
     assert n_apertado == 5
     assert apertado.dropped_pickups == n_todas - 5
     assert folgado.dropped_pickups == 0
 
 
 @pytest.mark.erp
-def test_overdue_days_configuravel(src):
+def test_dropped_pickups_reseta_entre_fetches():
     with connect(Profile.LOCACAO) as c:
-        curto = LocacaoSource(c, overdue_days=1).fetch(DIA, ImportMode.REPLANEJAR)
-        longo = LocacaoSource(c, overdue_days=365).fetch(DIA, ImportMode.REPLANEJAR)
+        src = LocacaoSource(c, overdue_days=1, max_pickups=5)
+        src.fetch(DIA, ImportMode.PRODUCAO)
+        assert src.dropped_pickups > 0
+        src.fetch(DIA, ImportMode.REPLANEJAR)      # 12 coletas, cabe no teto
+        assert src.dropped_pickups == 0
+
+
+@pytest.mark.erp
+def test_overdue_days_configuravel():
+    with connect(Profile.LOCACAO) as c:
+        curto = LocacaoSource(c, overdue_days=1, max_pickups=10_000) \
+            .fetch(DIA, ImportMode.PRODUCAO)
+        longo = LocacaoSource(c, overdue_days=365, max_pickups=10_000) \
+            .fetch(DIA, ImportMode.PRODUCAO)
     n_curto = len([s for s in curto if s.kind == "pickup"])
     n_longo = len([s for s in longo if s.kind == "pickup"])
-    assert n_curto >= n_longo
+    assert n_curto > n_longo
 
 
 @pytest.mark.erp
@@ -2410,8 +2453,23 @@ WHERE lp.DATA_LOCACAO = ?
 ORDER BY lp.ID_SEQUENCIA
 """
 
-# Vencidas: continuam em locação e foram entregues antes do corte.
-_COLETAS = """
+# Coleta em REPLANEJAR: o que foi de fato devolvido naquele dia. `DATA_DEVOLUCAO`
+# é preenchida retrospectivamente, quando a coleta acontece — então para
+# replanejar um dia histórico ela É a carga de coleta real daquele dia.
+_COLETAS_REPLANEJAR = """
+SELECT lp.ID_SEQUENCIA, lp.DATA_LOCACAO, lp.DOCUMENTO, lp.ID_CLIENTE,
+       lp.ENDERECO_ENTREGA, lp.QUANTIDADE, lp.DATA_DEVOLUCAO,
+       cf.NOME, cf.ENDERECO, cf.NUMERO, cf.BAIRRO, cf.CIDADE, cf.UF, cf.CEP,
+       it.DESCRICAO AS PRODUTO
+FROM LOCACAO_PRODUTO lp
+LEFT JOIN CLIFOR cf ON cf.ID = lp.ID_CLIENTE
+LEFT JOIN ITEM it ON it.ID_ITEM = lp.ID_PRODUTO
+WHERE lp.DATA_DEVOLUCAO = ?
+ORDER BY lp.ID_SEQUENCIA
+"""
+
+# Coleta em PRODUCAO: a fila de vencidas — segue em locação e passou do corte.
+_COLETAS_PRODUCAO = """
 SELECT lp.ID_SEQUENCIA, lp.DATA_LOCACAO, lp.DOCUMENTO, lp.ID_CLIENTE,
        lp.ENDERECO_ENTREGA, lp.QUANTIDADE, lp.DATA_DEVOLUCAO,
        cf.NOME, cf.ENDERECO, cf.NUMERO, cf.BAIRRO, cf.CIDADE, cf.UF, cf.CEP,
@@ -2460,9 +2518,13 @@ class LocacaoSource:
             raw=logradouro or "",
         )
 
-    def _stop(self, r: dict, kind: str, seq: int, target_date: date) -> Stop:
+    def _stop(self, r: dict, kind: str, seq: int, target_date: date,
+              mode: ImportMode) -> Stop:
         locado_em = r["DATA_LOCACAO"]
-        atraso = (target_date - locado_em).days if locado_em else 0
+        # Em PRODUCAO isto é atraso de verdade. Em REPLANEJAR é só há quantos
+        # dias o equipamento estava na rua — não deve inflar prioridade.
+        dias_na_rua = (target_date - locado_em).days if locado_em else 0
+        vencida = kind == "pickup" and mode is ImportMode.PRODUCAO
         return Stop(
             external_id=f"LOC:{int(r['ID_SEQUENCIA'])}",
             kind=kind,
@@ -2470,10 +2532,11 @@ class LocacaoSource:
             cliente_nome=_s(r["NOME"]) or "SEM NOME",
             address=self._address(r),
             amount=max(int(r["QUANTIDADE"] or 1), 1),
-            priority=min(max(atraso - self._overdue_days, 0), 100) if kind == "pickup" else 10,
+            priority=(min(max(dias_na_rua - self._overdue_days, 0), 100) if vencida
+                      else (20 if kind == "pickup" else 10)),
             service_seconds=1500 if kind == "pickup" else 900,
             due_date=None,
-            days_overdue=max(atraso, 0) if kind == "pickup" else 0,
+            days_overdue=max(dias_na_rua, 0) if vencida else 0,
             doc=_s(r["DOCUMENTO"]),
             notes=_s(r["PRODUTO"]) or "",
             erp_vehicle_id=None,
@@ -2486,17 +2549,22 @@ class LocacaoSource:
         seq = 0
 
         for r in self._conn.query(_ENTREGAS, (target_date,)):
-            stops.append(self._stop(r, "delivery", seq, target_date))
+            stops.append(self._stop(r, "delivery", seq, target_date, mode))
             seq += 1
 
-        corte = target_date - timedelta(days=self._overdue_days)
-        coletas = self._conn.query(_COLETAS, (corte,))
-        # Mais atrasadas primeiro; teto para não afogar a rota do dia.
-        # O que sobra NÃO some em silêncio: vai para dropped_pickups e a API
-        # devolve o número, senão a tela mente dizendo que cobriu tudo.
+        if mode is ImportMode.REPLANEJAR:
+            # Dia histórico: a coleta real é o que foi devolvido nele.
+            coletas = self._conn.query(_COLETAS_REPLANEJAR, (target_date,))
+        else:
+            corte = target_date - timedelta(days=self._overdue_days)
+            coletas = self._conn.query(_COLETAS_PRODUCAO, (corte,))
+
+        # Teto para uma fila de vencidas não afogar a rota do dia. O que sobra
+        # NÃO some em silêncio: vai para dropped_pickups e a API devolve o
+        # número, senão a tela mente dizendo que cobriu tudo.
         self.dropped_pickups = max(len(coletas) - self._max_pickups, 0)
         for r in coletas[: self._max_pickups]:
-            stops.append(self._stop(r, "pickup", seq, target_date))
+            stops.append(self._stop(r, "pickup", seq, target_date, mode))
             seq += 1
 
         return stops
