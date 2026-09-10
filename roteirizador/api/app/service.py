@@ -1,0 +1,131 @@
+from __future__ import annotations
+from datetime import date
+
+from .config import ImportMode, PROFILES, Profile, get_settings
+from .db.firebird import connect
+from .db.local import LocalStore
+from .erp.base import build_source
+from .geo.geocoder import Geocoder
+from .models import Depot, Stop, VehicleConfig, VehicleRoute
+from .routing.baseline import compare, measure_baseline
+from .routing.optimizer import Optimizer
+from .routing.osrm import OsrmClient
+
+_APROX_LOCACAO = ("baseline aproximado: o ERP não registra veículo nem ordem "
+                  "para locação; usada a ordem de lançamento")
+
+
+def store() -> LocalStore:
+    s = LocalStore(get_settings().local_db)
+    s.init_schema()
+    return s
+
+
+def geocoder() -> Geocoder:
+    return Geocoder(get_settings().streets_db, store())
+
+
+def optimizer() -> Optimizer:
+    s = get_settings()
+    return Optimizer(s.vroom_url, OsrmClient(s.osrm_url), s.solver_timeout_s)
+
+
+# ---------------------------------------------------------------- importação
+def import_stops(profile: Profile, target_date: date,
+                 mode: ImportMode) -> tuple[list[Stop], dict]:
+    with connect(profile) as conn:
+        source = build_source(profile, conn)
+        stops = source.fetch(target_date, mode)
+        # Coletas vencidas que não couberam no teto do dia. Vai para a tela:
+        # dizer "46 paradas" quando 272 ficaram de fora é mentir para o usuário.
+        dropped = getattr(source, "dropped_pickups", 0)
+
+    geo = geocoder()
+    for s in stops:
+        s.address_key, s.geo = geo.geocode(s.address)
+
+    counts = {
+        "total": len(stops),
+        "pickup_dropped": dropped,
+        "delivery": sum(1 for s in stops if s.kind == "delivery"),
+        "pickup": sum(1 for s in stops if s.kind == "pickup"),
+        "high": sum(1 for s in stops if s.geo and s.geo.confidence == "high"),
+        "medium": sum(1 for s in stops if s.geo and s.geo.confidence == "medium"),
+        "low": sum(1 for s in stops if s.geo and s.geo.confidence == "low"),
+        "failed": sum(1 for s in stops
+                      if not s.geo or s.geo.confidence == "failed"),
+    }
+    return stops, counts
+
+
+# ---------------------------------------------------------------- serialização
+def stop_payload(s: Stop) -> dict:
+    a = s.address
+    endereco = ", ".join(p for p in [a.logradouro, a.bairro, a.cidade] if p)
+    return {
+        "external_id": s.external_id, "kind": s.kind,
+        "cliente_id": s.cliente_id, "cliente_nome": s.cliente_nome,
+        "address": endereco, "address_key": s.address_key,
+        "amount": s.amount, "priority": s.priority,
+        "days_overdue": s.days_overdue, "doc": s.doc, "notes": s.notes,
+        "lon": s.geo.lon if s.geo else None,
+        "lat": s.geo.lat if s.geo else None,
+        "confidence": s.geo.confidence if s.geo else "failed",
+        "source": s.geo.source if s.geo else "none",
+    }
+
+
+def route_payload(r: VehicleRoute) -> dict:
+    return {
+        "vehicle_id": r.vehicle_id, "config_id": r.config_id, "label": r.label,
+        "trip_index": r.trip_index, "geometry": r.geometry,
+        "distance_km": round(r.distance_m / 1000, 1),
+        "duration_min": round(r.duration_s / 60),
+        "steps": [{"seq": s.seq, "stop_external_id": s.stop_external_id,
+                   "kind": s.kind, "lon": s.lon, "lat": s.lat,
+                   "arrival_s": s.arrival_s, "load_after": s.load_after}
+                  for s in sorted(r.steps, key=lambda x: x.seq)],
+    }
+
+
+# ---------------------------------------------------------------- otimização
+def optimize(profile: Profile, target_date: date, mode: ImportMode,
+             cost_per_km: float = 3.50) -> dict:
+    st = store()
+    depot = st.get_depot(profile)
+    if depot is None:
+        raise ValueError("depósito não configurado para este perfil")
+    fleet = [v for v in st.get_fleet(profile) if v.enabled]
+    if not fleet:
+        raise ValueError("nenhum veículo habilitado na frota")
+
+    stops, counts = import_stops(profile, target_date, mode)
+
+    opt = optimizer()
+    solution = opt.solve(stops, fleet, depot)
+
+    with connect(profile) as conn:
+        trips = build_source(profile, conn).baseline_order(stops)
+    aproximado = profile is Profile.LOCACAO
+    base = measure_baseline(trips, stops, OsrmClient(get_settings().osrm_url), depot,
+                            approximate=aproximado,
+                            note=_APROX_LOCACAO if aproximado else "")
+    comp = compare(solution, base, cost_per_km=cost_per_km)
+
+    payload = {
+        "profile": profile.value,
+        "mode": mode.value,
+        "counts": counts,
+        "depot": {"label": depot.label, "lon": depot.lon, "lat": depot.lat,
+                  "address": depot.address},
+        "stops": [stop_payload(s) for s in stops],
+        "routes": [route_payload(r) for r in solution.routes if r.steps],
+        "unassigned": [{"stop_external_id": u.stop_external_id, "reason": u.reason}
+                       for u in solution.unassigned],
+        "totals": {"distance_km": round(solution.total_distance_m / 1000, 1),
+                   "duration_h": round(solution.total_duration_s / 3600, 1),
+                   "vehicles_used": len([r for r in solution.routes if r.steps])},
+        "comparison": comp.__dict__,
+    }
+    payload["run_id"] = st.save_run(profile, target_date.isoformat(), payload)
+    return payload
