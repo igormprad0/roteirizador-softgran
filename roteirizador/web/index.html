@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roteirizador — Softgran</title>
+  <link rel="stylesheet" href="vendor/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Roteirizador</h1>
+  <div class="controls">
+    <select id="profile"></select>
+    <input type="date" id="date" value="2026-08-04">
+    <select id="mode">
+      <option value="replanejar">Replanejar dia histórico</option>
+      <option value="producao">Produção (pendentes)</option>
+    </select>
+    <button id="btn-import">Importar</button>
+    <button id="btn-optimize" class="primary" disabled>Otimizar</button>
+    <button id="btn-fleet">Frota</button>
+  </div>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <div id="counts" class="counts"></div>
+    <ul id="stops"></ul>
+  </aside>
+  <div id="map"></div>
+</main>
+
+<section id="panel" hidden>
+  <h2>Hoje vs Otimizado</h2>
+  <div id="kpis" class="kpis"></div>
+  <p id="note" class="note"></p>
+  <div id="routes" class="routes"></div>
+  <div id="unassigned" class="unassigned"></div>
+</section>
+
+<dialog id="fleet-dialog">
+  <h2>Frota e depósito</h2>
+  <div id="depot-box"></div>
+  <table id="fleet-table">
+    <thead><tr><th>Usar</th><th>Veículo</th><th>Placa</th><th>Cap.</th>
+      <th>Viagens</th><th>Início</th><th>Fim</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <menu>
+    <button id="fleet-cancel">Fechar</button>
+    <button id="fleet-save" class="primary">Salvar</button>
+  </menu>
+</dialog>
+
+<script src="vendor/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
