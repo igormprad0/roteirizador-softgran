@@ -1,6 +1,8 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 firebird-driver==2.0.3
+firebird-base==2.0.3
+protobuf==5.29.6
 pydantic==2.10.4
 rapidfuzz==3.11.0
 osmium==3.7.0
