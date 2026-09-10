@@ -1835,6 +1835,26 @@ Três correções decorrem disso, e nenhuma é opcional:
 
 Nada disso conserta a esparsidade do OSM — conserta o comportamento diante dela. Uma parada com a rua certa e posição aproximada dentro dela ordena uma rota corretamente; uma parada a 5 km inverte a sequência.
 
+### Para a locação, o ganho é cobertura, não distância
+
+Com o baseline já corrigido para respeitar a capacidade, os números finais medidos são:
+
+| | locação (04/08) | entrega posterior (13/08) |
+|---|---|---|
+| paradas atendidas pelo otimizador | **25** de 38 | 17 de 18 |
+| paradas que a ordem de lançamento encaixa na mesma frota | **15** | — (baseline real do ERP) |
+| economia em distância | 0,8% | **29,6%** |
+| baseline | aproximado | real (veículo e hora do ERP) |
+
+São dois casos de valor diferentes, e apresentar os dois como "economia de km" desserve o principal:
+
+- **Entrega posterior:** ganho clássico de roteirização. 29,6% menos quilômetro, baseline real do ERP. O número fala sozinho.
+- **Locação:** a distância por parada é praticamente a mesma (0,8%). O ganho é **throughput** — 25 entregas por dia contra 15, com os mesmos dois caminhões, +67%. Para um poliguindaste de capacidade 1 a rota é quase determinada pela física; o que o otimizador melhora é *quantas* cabem no dia, não *quanto* se roda.
+
+Hoje esses 15 existem apenas dentro de `comparison.note`, em prosa. A tela mostraria "0,8% · R$ 40,81/mês" e enterraria o argumento.
+
+**Correção:** `comparison` ganha `baseline_stops` e `optimized_stops` como números, e a tela mostra cobertura ao lado de distância — sempre os dois, deixando o dado falar por cliente em vez de escolher a narrativa no código.
+
 ### O baseline tem de ser fisicamente possível (medido na Task 15)
 
 Com a frota realista (2 poliguindastes, capacidade 1, 14 viagens/dia) a economia medida na locação caiu para **0,6%** — contra 36,8% com a frota-placeholder menor da Task 13. Investigado até a causa: **o baseline é infactível.**
