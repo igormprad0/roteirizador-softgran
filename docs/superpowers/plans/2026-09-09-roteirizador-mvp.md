@@ -2175,6 +2175,20 @@ def test_cai_no_cadastro_do_clifor_quando_endereco_entrega_esta_vazio(src):
 
 
 @pytest.mark.erp
+def test_teto_de_coletas_e_reportado_nao_engolido(src):
+    with connect(Profile.LOCACAO) as c:
+        apertado = LocacaoSource(c, overdue_days=30, max_pickups=5)
+        stops = apertado.fetch(DIA, ImportMode.REPLANEJAR)
+        folgado = LocacaoSource(c, overdue_days=30, max_pickups=10_000)
+        todas = folgado.fetch(DIA, ImportMode.REPLANEJAR)
+    n_apertado = len([s for s in stops if s.kind == "pickup"])
+    n_todas = len([s for s in todas if s.kind == "pickup"])
+    assert n_apertado == 5
+    assert apertado.dropped_pickups == n_todas - 5
+    assert folgado.dropped_pickups == 0
+
+
+@pytest.mark.erp
 def test_overdue_days_configuravel(src):
     with connect(Profile.LOCACAO) as c:
         curto = LocacaoSource(c, overdue_days=1).fetch(DIA, ImportMode.REPLANEJAR)
@@ -2264,6 +2278,7 @@ class LocacaoSource:
         self._conn = conn
         self._overdue_days = overdue_days
         self._max_pickups = max_pickups
+        self.dropped_pickups = 0        # coletas vencidas que não couberam no teto
 
     # ------------------------------------------------------------------
     def _address(self, r: dict) -> Address:
@@ -2314,6 +2329,9 @@ class LocacaoSource:
         corte = target_date - timedelta(days=self._overdue_days)
         coletas = self._conn.query(_COLETAS, (corte,))
         # Mais atrasadas primeiro; teto para não afogar a rota do dia.
+        # O que sobra NÃO some em silêncio: vai para dropped_pickups e a API
+        # devolve o número, senão a tela mente dizendo que cobriu tudo.
+        self.dropped_pickups = max(len(coletas) - self._max_pickups, 0)
         for r in coletas[: self._max_pickups]:
             stops.append(self._stop(r, "pickup", seq, target_date))
             seq += 1
@@ -3116,7 +3134,7 @@ from __future__ import annotations
 import httpx
 
 from ..models import Depot, Solution, Stop, VehicleConfig
-from .osrm import OsrmClient
+from .osrm import OsrmClient, OsrmError
 from .vroom import build_payload, expand_trips, parse_solution
 
 
@@ -3161,8 +3179,10 @@ class Optimizer:
                 + [depot.coord]
             try:
                 route.geometry = self._osrm.route(coords).polyline
-            except Exception:
-                route.geometry = ""      # mapa desenha só os pinos; rota segue válida
+            except (OsrmError, httpx.HTTPError):
+                # Geometria é cosmética: sem ela o mapa desenha só os pinos e a
+                # rota continua válida. Erros fora desses dois sobem — são bugs.
+                route.geometry = ""
 ```
 
 - [ ] **Step 8: Rodar os testes**
@@ -3535,6 +3555,7 @@ def test_import_locacao_devolve_paradas_e_contagens():
     assert body["counts"]["total"] == len(body["stops"])
     assert body["counts"]["total"] > 10
     assert body["counts"]["delivery"] + body["counts"]["pickup"] == body["counts"]["total"]
+    assert "pickup_dropped" in body["counts"]        # teto reportado, não engolido
     s = body["stops"][0]
     assert {"external_id", "kind", "cliente_nome", "address", "address_key",
             "lon", "lat", "confidence", "source"} <= set(s)
@@ -3695,7 +3716,11 @@ def optimizer() -> Optimizer:
 def import_stops(profile: Profile, target_date: date,
                  mode: ImportMode) -> tuple[list[Stop], dict]:
     with connect(profile) as conn:
-        stops = build_source(profile, conn).fetch(target_date, mode)
+        source = build_source(profile, conn)
+        stops = source.fetch(target_date, mode)
+        # Coletas vencidas que não couberam no teto do dia. Vai para a tela:
+        # dizer "46 paradas" quando 272 ficaram de fora é mentir para o usuário.
+        dropped = getattr(source, "dropped_pickups", 0)
 
     geo = geocoder()
     for s in stops:
@@ -3703,6 +3728,7 @@ def import_stops(profile: Profile, target_date: date,
 
     counts = {
         "total": len(stops),
+        "pickup_dropped": dropped,
         "delivery": sum(1 for s in stops if s.kind == "delivery"),
         "pickup": sum(1 for s in stops if s.kind == "pickup"),
         "high": sum(1 for s in stops if s.geo and s.geo.confidence == "high"),
