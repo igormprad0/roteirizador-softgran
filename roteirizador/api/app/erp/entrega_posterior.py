@@ -3,7 +3,7 @@ from datetime import date
 
 from ..config import ImportMode, Profile
 from ..db.firebird import ErpConnection
-from ..models import Address, BaselineTrip, Stop
+from ..models import Address, BaselineTrip, Stop, Vehicle
 
 _SQL = """
 SELECT p.ID_CONTROLE AS PCAB_ID, p.ID_ENTREGA, p.DATA, p.HORA, p.ID_VEICULO,
@@ -77,9 +77,14 @@ class EntregaPosteriorSource:
             ))
         return stops
 
-    def baseline_order(self, stops: list[Stop]) -> list[BaselineTrip]:
+    def baseline_order(self, stops: list[Stop],
+                       vehicles: list[Vehicle]) -> list[BaselineTrip]:
         """A rota que a operação realmente executou: agrupada por veículo do ERP,
-        na ordem de HORA (já refletida em erp_sequence pelo ORDER BY do fetch)."""
+        na ordem de HORA (já refletida em erp_sequence pelo ORDER BY do fetch).
+        `vehicles` não é usado aqui -- ao contrário da locação (§5.4), este
+        baseline não é reconstruído: é o veículo e a hora que o ERP de fato
+        registrou, por isso já é factível por construção. O parâmetro existe
+        só para manter a mesma assinatura de `StopSource.baseline_order`."""
         grupos: dict[int | None, list[Stop]] = {}
         for s in sorted(stops, key=lambda x: x.erp_sequence):
             grupos.setdefault(s.erp_vehicle_id, []).append(s)

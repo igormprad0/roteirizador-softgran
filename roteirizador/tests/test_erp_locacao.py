@@ -7,8 +7,11 @@ from api.app.config import ImportMode, Profile
 from api.app.db.firebird import connect
 from api.app.erp.base import build_source
 from api.app.erp.locacao import LocacaoSource
+from api.app.models import Address, Depot, Stop, VehicleConfig
+from api.app.routing.vroom import expand_trips
 
 DIA = date(2026, 8, 4)
+DEPOSITO = Depot("Depósito", -54.8060, -22.2210)
 
 
 @pytest.fixture(scope="module")
@@ -148,13 +151,98 @@ def test_overdue_days_configuravel():
 
 @pytest.mark.erp
 def test_baseline_particiona_pela_ordem_de_lancamento(src):
+    """Com uma frota folgada (capacidade que nunca vira gargalo), tudo cabe
+    numa única viagem, na ordem de lançamento -- prova que a partição
+    respeita `erp_sequence` quando capacidade não é o fator limitante."""
     stops = src.fetch(DIA, ImportMode.REPLANEJAR)
-    trips = src.baseline_order(stops)
+    frota_folgada = [VehicleConfig(id="X", label="X", capacity=1000, trips=1)]
+    trips = src.baseline_order(stops, expand_trips(frota_folgada, DEPOSITO))
     assert len(trips) >= 1
     assert sum(len(t.stop_external_ids) for t in trips) == len(stops)
     por_id = {s.external_id: s for s in stops}
     primeira = [por_id[i].erp_sequence for i in trips[0].stop_external_ids]
     assert primeira == sorted(primeira)
+
+
+@pytest.mark.erp
+def test_baseline_respeita_capacidade_da_viagem(src):
+    """Achado do coordenador (fix round 1): antes desta correção, o baseline
+    empacotava ~12 paradas por viagem ignorando capacidade -- fisicamente
+    impossível para uma poliguindaste (capacidade 1, uma caçamba por vez).
+    Com a frota real do seed de demo (capacidade 1), toda viagem devolvida
+    tem que ser executável: nunca mais de uma entrega "a bordo" ao mesmo
+    tempo (duas exigiriam carregar duas caçambas novas simultaneamente)."""
+    stops = src.fetch(DIA, ImportMode.REPLANEJAR)
+    frota = [
+        VehicleConfig(id="MB1513", label="MB1513", capacity=1, trips=8,
+                     shift_start_s=7 * 3600, shift_end_s=18 * 3600),
+        VehicleConfig(id="TRUCK2", label="Truck reserva", capacity=1, trips=6,
+                     shift_start_s=7 * 3600, shift_end_s=17 * 3600),
+    ]
+    trips = src.baseline_order(stops, expand_trips(frota, DEPOSITO))
+    por_id = {s.external_id: s for s in stops}
+
+    # Neste dia (2026-08-04) a ordem de lançamento é [26 entregas][12
+    # coletas] (ver `fetch`: entregas vêm todas antes de coletas) e a frota
+    # tem só 14 viagens -- todas se esgotam ainda dentro do bloco de
+    # entregas, nunca alcançando o bloco de coletas, então NENHUMA viagem
+    # deste teste combina entrega+coleta. Isso não é um bug: é a ordem real
+    # de lançamento do ERP sendo respeitada como pedido, e é justamente por
+    # isso que a prova de que "entrega seguida de coleta CABE" precisa de
+    # dado sintético determinístico -- ver
+    # `test_cabe_permite_entrega_seguida_de_coleta_mas_nao_o_contrario`
+    # abaixo, que não depende de qual endereço caiu em que posição.
+    assert trips, "frota realista deveria produzir pelo menos uma viagem"
+    for t in trips:
+        viagem = [por_id[i] for i in t.stop_external_ids]
+        assert LocacaoSource._cabe(viagem, 1), (
+            f"{t.label} excede capacidade 1: "
+            f"{[(s.kind, s.amount) for s in viagem]}")
+        n_entregas = sum(1 for s in viagem if s.kind == "delivery")
+        assert n_entregas <= 1, f"{t.label} carrega {n_entregas} entregas ao mesmo tempo"
+
+    # a lógica antiga (blocos fixos de ~12) teria devolvido poucas viagens
+    # grandes; a física real de capacidade 1 exige muitas viagens curtas --
+    # prova de que a correção mudou o comportamento, não só a assinatura.
+    assert len(trips) > 5
+
+
+def _mini_stop(ext_id: str, kind: str, seq: int, amount: int = 1):
+    addr = Address(None, None, None, "DOURADOS", "MS", None, "")
+    return Stop(external_id=ext_id, kind=kind, cliente_id=1, cliente_nome="C",
+               address=addr, amount=amount, erp_sequence=seq)
+
+
+def test_cabe_permite_entrega_seguida_de_coleta_mas_nao_o_contrario():
+    """Prova determinística (dado sintético, sem tocar o ERP) de que a
+    capacidade 1 permite "sai cheio, volta cheio": uma entrega pré-carregada
+    no depósito, seguida de uma coleta que ocupa o espaço que a entrega
+    liberou ao ser descarregada. Mas não permite duas entregas ao mesmo
+    tempo (exigiria duas caçambas a bordo), nem a ordem trocada -- coleta
+    antes de a entrega ter sido descarregada exigiria 2 itens a bordo ao
+    mesmo tempo, mesmo que a entrega só "saia" depois."""
+    entrega = _mini_stop("E1", "delivery", 0)
+    coleta = _mini_stop("P1", "pickup", 1)
+    outra_entrega = _mini_stop("E2", "delivery", 2)
+
+    assert LocacaoSource._cabe([entrega, coleta], 1)              # sai cheio, volta cheio
+    assert not LocacaoSource._cabe([entrega, outra_entrega], 1)   # 2 entregas ao mesmo tempo
+    assert not LocacaoSource._cabe([coleta, entrega], 1)          # ordem errada, capacidade 1
+    assert LocacaoSource._cabe([coleta, entrega], 2)              # capacidade 2 já tolera a troca
+
+
+def test_baseline_order_encadeia_entrega_e_coleta_numa_so_viagem_sintetica():
+    """Mesma prova, mas passando pelo caminho real (`baseline_order`, não só
+    `_cabe` isolado): com uma entrega seguida de uma coleta na ordem de
+    lançamento e uma frota de capacidade 1, as duas paradas caem na MESMA
+    viagem -- o comportamento que a correção do coordenador pediu."""
+    stops = [_mini_stop("E1", "delivery", 0), _mini_stop("P1", "pickup", 1)]
+    frota = [VehicleConfig(id="X", label="X", capacity=1, trips=1)]
+    # `baseline_order` não toca `self._conn` (só `fetch` toca) -- não precisa
+    # de conexão real com o Firebird para este teste sintético e determinístico.
+    trips = LocacaoSource(None).baseline_order(stops, expand_trips(frota, DEPOSITO))
+    assert len(trips) == 1
+    assert trips[0].stop_external_ids == ["E1", "P1"]
 
 
 @pytest.mark.erp

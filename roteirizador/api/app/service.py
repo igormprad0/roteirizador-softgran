@@ -1,4 +1,5 @@
 from __future__ import annotations
+import dataclasses
 from datetime import date
 
 from .config import ImportMode, PROFILES, Profile, get_settings
@@ -6,10 +7,11 @@ from .db.firebird import connect
 from .db.local import LocalStore
 from .erp.base import build_source
 from .geo.geocoder import Geocoder
-from .models import Depot, Stop, VehicleConfig, VehicleRoute
+from .models import BaselineTrip, Depot, Stop, VehicleConfig, VehicleRoute
 from .routing.baseline import compare, measure_baseline
 from .routing.optimizer import Optimizer
 from .routing.osrm import OsrmClient
+from .routing.vroom import expand_trips
 
 _APROX_LOCACAO = ("baseline aproximado: o ERP não registra veículo nem ordem "
                   "para locação; usada a ordem de lançamento")
@@ -114,13 +116,61 @@ def optimize(profile: Profile, target_date: date, mode: ImportMode,
     atendidas_ids = {s.stop_external_id for r in solution.routes for s in r.steps}
     atendidas = [s for s in stops if s.external_id in atendidas_ids]
 
+    # Mesma frota expandida (mesmas viagens, mesma capacidade por viagem)
+    # que o otimizador usa -- o baseline de locação precisa respeitar a
+    # mesma física de capacidade que a rota otimizada é obrigada a
+    # respeitar, senão o comparativo mede um lado contra uma rota que não
+    # poderia ter sido executada (ver `erp/locacao.py::baseline_order`).
     with connect(profile) as conn:
-        trips = build_source(profile, conn).baseline_order(atendidas)
+        trips = build_source(profile, conn).baseline_order(
+            atendidas, expand_trips(fleet, depot))
     aproximado = profile is Profile.LOCACAO
-    base = measure_baseline(trips, atendidas, OsrmClient(get_settings().osrm_url), depot,
-                            approximate=aproximado,
-                            note=_APROX_LOCACAO if aproximado else "")
-    comp = compare(solution, base, cost_per_km=cost_per_km)
+    osrm = OsrmClient(get_settings().osrm_url)
+    note = _APROX_LOCACAO if aproximado else ""
+    base = measure_baseline(trips, atendidas, osrm, depot,
+                            approximate=aproximado, note=note)
+
+    # O baseline aproximado respeita ordem de lançamento E capacidade (ver
+    # `LocacaoSource.baseline_order`) -- diferente do otimizador, ele não
+    # pode reordenar paradas para encaixar mais gente na mesma frota. Pode,
+    # portanto, deixar de colocar em ALGUMA viagem parte das paradas que o
+    # otimizador atendeu (ele reordena; o baseline "aproximado" não pode,
+    # por definição). Comparar um baseline sobre menos paradas contra um
+    # otimizado sobre mais paradas reintroduz o mesmo tipo de injustiça que
+    # a Task 13 corrigiu (medir lados com quantidades de trabalho
+    # diferentes) -- só que no sentido oposto: baseline artificialmente
+    # barato, "economia" artificialmente negativa. Quando isso acontece,
+    # restringe os dois lados às paradas que o baseline também conseguiu
+    # colocar em alguma viagem, medindo o lado otimizado do mesmo jeito que
+    # o baseline (uma "viagem" OSRM por rota, na sequência que o VROOM já
+    # decidiu -- não uma reotimização).
+    cobertas_pelo_baseline = {i for t in trips for i in t.stop_external_ids}
+    solucao_comparavel = solution
+    if cobertas_pelo_baseline and cobertas_pelo_baseline != atendidas_ids:
+        comparaveis = [s for s in atendidas if s.external_id in cobertas_pelo_baseline]
+        trips_otimizado = [
+            BaselineTrip(
+                label=r.vehicle_id,
+                stop_external_ids=[s.stop_external_id
+                                   for s in sorted(r.steps, key=lambda x: x.seq)
+                                   if s.stop_external_id in cobertas_pelo_baseline])
+            for r in solution.routes
+        ]
+        trips_otimizado = [t for t in trips_otimizado if t.stop_external_ids]
+        otimizado_restrito = measure_baseline(trips_otimizado, comparaveis, osrm, depot,
+                                              approximate=False, note="")
+        solucao_comparavel = dataclasses.replace(
+            solution, total_distance_m=otimizado_restrito.total_distance_m,
+            total_duration_s=otimizado_restrito.total_duration_s)
+        base = dataclasses.replace(base, note=(
+            f"{note} comparativo restrito a {len(comparaveis)} das "
+            f"{len(atendidas)} paradas atendidas -- o baseline aproximado "
+            f"não conseguiu encaixar o restante na mesma frota respeitando "
+            f"a ordem de lançamento (o otimizador pode reordenar; este "
+            f"baseline, por definição, não pode)."
+        ).strip())
+
+    comp = compare(solucao_comparavel, base, cost_per_km=cost_per_km)
 
     payload = {
         "profile": profile.value,

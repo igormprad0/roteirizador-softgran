@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 from ..config import ImportMode, Profile
 from ..db.firebird import ErpConnection
-from ..models import Address, BaselineTrip, Stop
+from ..models import Address, BaselineTrip, Stop, Vehicle
 
 _ENTREGAS = """
 SELECT lp.ID_SEQUENCIA, lp.DATA_LOCACAO, lp.DOCUMENTO, lp.ID_CLIENTE,
@@ -133,18 +133,61 @@ class LocacaoSource:
 
         return stops
 
-    def baseline_order(self, stops: list[Stop]) -> list[BaselineTrip]:
+    def baseline_order(self, stops: list[Stop],
+                       vehicles: list[Vehicle]) -> list[BaselineTrip]:
         """Aproximado (§5.4 do spec): o ERP não registra veículo nem ordem para
-        locação. Reproduz o operador trabalhando de cima para baixo na lista."""
-        if not stops:
+        locação. Reproduz um operador despachando a lista de lançamento de
+        cima para baixo para a próxima viagem disponível -- mas cada viagem
+        respeita a MESMA capacidade que o otimizador usa (`vehicles`, a
+        lista expandida de `routing/vroom.py::expand_trips`, o mesmo objeto
+        que o VROOM recebe).
+
+        Antes desta versão, o baseline agrupava em blocos fixos de ~12
+        paradas ignorando capacidade -- presumindo um caminhão saindo do
+        depósito com doze caçambas. Uma poliguindaste carrega UMA. Isso
+        comparava uma rota otimizada que obedece capacidade contra um
+        baseline que a ignora: o otimizado era forçado a idas-e-vindas
+        curtas (caro por natureza) contra um baseline que encadeava doze
+        paradas sem nunca voltar ao depósito -- entendia menos economia do
+        que existe de verdade, do mesmo jeito (e no mesmo tamanho de erro)
+        que uma versão ainda mais antiga tinha inflado a economia ao
+        comparar lados com números de parada diferentes (ver `service.py`).
+
+        Uma entrega é pré-carregada no depósito (precisa estar a bordo antes
+        de sair) e libera espaço ao ser entregue; uma coleta ocupa espaço ao
+        ser recolhida -- por isso uma viagem de capacidade 1 PODE, sim,
+        entregar um equipamento e na sequência coletar o vencido ("sai
+        cheio, volta cheio"), mas não pode carregar duas entregas ao mesmo
+        tempo. `_cabe` simula exatamente essa física."""
+        if not stops or not vehicles:
             return []
-        ordenadas = sorted(stops, key=lambda s: s.erp_sequence)
-        n_trips = max(1, round(len(ordenadas) / 12))
-        tamanho = -(-len(ordenadas) // n_trips)          # ceil
-        return [
-            BaselineTrip(label=f"Viagem {i + 1}",
-                         stop_external_ids=[s.external_id
-                                            for s in ordenadas[i * tamanho:(i + 1) * tamanho]])
-            for i in range(n_trips)
-            if ordenadas[i * tamanho:(i + 1) * tamanho]
-        ]
+        fila = sorted(stops, key=lambda s: s.erp_sequence)
+        trips: list[BaselineTrip] = []
+        for v in vehicles:
+            if not fila:
+                break
+            viagem: list[Stop] = []
+            while fila and self._cabe(viagem + [fila[0]], v.capacity):
+                viagem.append(fila.pop(0))
+            if viagem:
+                # `v.label` já vem qualificado com "— viagem N" para N > 1
+                # (montado em `expand_trips`); não duplicar aqui.
+                trips.append(BaselineTrip(
+                    label=v.label, stop_external_ids=[s.external_id for s in viagem]))
+        return trips
+
+    @staticmethod
+    def _cabe(viagem: list[Stop], capacidade: int) -> bool:
+        """Simula a carga ao longo de UMA viagem, na ordem dada. Toda entrega
+        da viagem precisa estar pré-carregada no depósito antes da partida
+        (soma de todas as entregas, não só a próxima) -- por isso a carga
+        inicial já conta como um pico a respeitar, não só os picos depois de
+        cada coleta."""
+        carga = sum(s.amount for s in viagem if s.kind == "delivery")
+        if carga > capacidade:
+            return False
+        for s in viagem:
+            carga += -s.amount if s.kind == "delivery" else s.amount
+            if carga > capacidade:
+                return False
+        return True

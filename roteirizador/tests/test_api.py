@@ -1,4 +1,5 @@
 # tests/test_api.py
+import os
 from datetime import date
 
 import pytest
@@ -9,6 +10,37 @@ from api.app.main import app
 client = TestClient(app)
 DIA_LOC = "2026-08-04"
 DIA_EP = "2026-08-13"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_db_isolado(tmp_path_factory):
+    """Este arquivo reconfigura frota/depósito de locação repetidas vezes
+    (`PUT /api/fleet`, `PUT /api/depot`) sem restaurar o estado anterior ao
+    final de cada teste -- e o fazia contra o MESMO `local.db` real que
+    `scripts/seed_demo.py` configura para a demo e que `test_e2e.py` espera
+    encontrar intacto. Isso fazia `test_e2e.py::test_capacidade_nunca_e_
+    estourada` passar isolado e falhar dentro da suíte inteira, dependendo
+    de quem rodou antes -- exatamente o tipo de teste que não deveria
+    existir (achado do coordenador, fix round 1).
+
+    Redireciona só `LOCAL_DB` para um arquivo temporário exclusivo deste
+    módulo (nunca `STREETS_DB`/`OSM_PBF`/Firebird, que continuam
+    apontando para os dados reais -- só o estado de frota/depósito/cache/
+    runs precisa de isolamento) e restaura o valor original ao final, para
+    que qualquer arquivo rodado depois -- em qualquer ordem -- veja o
+    `local.db` exatamente como estava antes deste módulo."""
+    from api.app.config import get_settings
+
+    original = os.environ.get("LOCAL_DB")
+    caminho = tmp_path_factory.mktemp("test_api_local_db") / "local.db"
+    os.environ["LOCAL_DB"] = str(caminho)
+    get_settings.cache_clear()
+    yield
+    if original is None:
+        os.environ.pop("LOCAL_DB", None)
+    else:
+        os.environ["LOCAL_DB"] = original
+    get_settings.cache_clear()
 
 
 def _baseline_km_sobre_todas_as_paradas(profile_str: str, dia: str) -> float:
@@ -22,13 +54,16 @@ def _baseline_km_sobre_todas_as_paradas(profile_str: str, dia: str) -> float:
     from api.app.erp.base import build_source
     from api.app.routing.baseline import measure_baseline
     from api.app.routing.osrm import OsrmClient
+    from api.app.routing.vroom import expand_trips
 
     profile = Profile(profile_str)
     stops, _ = service.import_stops(profile, date.fromisoformat(dia),
                                     ImportMode.REPLANEJAR)
     depot = service.store().get_depot(profile)
+    fleet = [v for v in service.store().get_fleet(profile) if v.enabled]
     with connect(profile) as conn:
-        trips = build_source(profile, conn).baseline_order(stops)
+        trips = build_source(profile, conn).baseline_order(
+            stops, expand_trips(fleet, depot))
     base = measure_baseline(trips, stops,
                             OsrmClient(service.get_settings().osrm_url), depot,
                             approximate=True)

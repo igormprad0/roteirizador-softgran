@@ -47,14 +47,14 @@ docker compose run --rm api pytest -m "not erp and not stack"  # só unitários
 
 `tests/test_e2e.py` (marcado `erp`, `stack`, `slow`) roda os dois dias reais
 das duas bases contra a stack no ar — exige `docker compose up -d` com as
-bases copiadas e o índice de ruas construído. Rode `scripts/seed_demo.py`
-imediatamente antes, porque `tests/test_api.py` reconfigura a frota de
-locação para seu próprio cenário de teste (1 caminhão, capacidade 2) e não
-a restaura — ao rodar a suíte inteira de uma vez, isso derruba a asserção de
-capacidade de `test_e2e.py` se ela rodar depois (os dois arquivos são os
-únicos que apontam para o `local.db` real, em vez de um banco isolado por
-teste). Não é um defeito do otimizador: rodando `test_e2e.py` sozinho logo
-após o seed, os 12 testes passam.
+bases copiadas, o índice de ruas construído e `scripts/seed_demo.py` já
+rodado. `tests/test_api.py` reconfigura a frota de locação repetidas vezes
+para seus próprios cenários de teste, mas roda contra um `local.db`
+temporário isolado (fixture `_local_db_isolado`), não contra o `local.db`
+real do seed — a suíte inteira passa em qualquer ordem, sem depender de
+quem rodou antes (verificado rodando `test_api.py`→`test_e2e.py` e
+`test_e2e.py`→`test_api.py`, e a suíte inteira duas vezes em ordens
+diferentes).
 
 ## Roteiro da demo
 
@@ -67,7 +67,12 @@ após o seed, os 12 testes passam.
    paradas do dia — as outras 13 não cabem na frota/janela do dia e aparecem
    destacadas, não escondidas.
 3. Painel **Hoje vs Otimizado**: km, horas e R$/mês. Dizer que o baseline de
-   locação é aproximado (o ERP não registra ordem) — isso constrói credibilidade.
+   locação é aproximado (o ERP não registra ordem) — isso constrói
+   credibilidade. Para locação a economia em km é pequena (a física de
+   capacidade 1 não deixa muita margem) — o argumento real aqui é cobertura:
+   25 das 38 paradas do dia com a mesma frota, contra 15 num despacho
+   ingênuo que segue a mesma ordem sem poder reordenar. Dizer isso em voz
+   alta é mais forte que o número de km.
 4. **Entrega posterior, 09/12/2024** — o dia de pico, 215 paradas, para mostrar
    que escala.
 5. Abrir um romaneio PDF e o link do Google Maps.
@@ -91,29 +96,58 @@ após o seed, os 12 testes passam.
   ferramenta dizer "sua frota não cobre este dia" é um argumento de venda,
   não uma falha — e as paradas não atendidas aparecem destacadas na tela,
   nunca escondidas.
-- **A economia medida no dia de locação é pequena (0,6%, 97,8 km → 97,2
-  km) — bem menor do que se poderia esperar.** O baseline de locação é a
-  ordem de lançamento do ERP particionada em blocos de ~12 paradas (o ERP
-  não registra veículo nem ordem real — ver item abaixo); com capacidade 1,
-  a rota otimizada é necessariamente uma sequência de idas e vindas curtas
-  ao depósito, e esse formato físico deixa pouca margem de ganho sobre um
-  baseline que, mesmo em ordem arbitrária, encadeia várias paradas por
-  bloco. Medições anteriores deste projeto, com uma frota de teste menor (1
-  caminhão, capacidade 2, 6 viagens — antes de este seed final ser
-  dimensionado), haviam chegado a 36,8%; com a frota atual, dimensionada
-  para cobrir mais paradas reais, o número medido é este 0,6%. No dia de
-  entrega posterior (13/08/2026) a economia é maior e mais representativa:
-  29,6% (286,3 km → 201,5 km), com baseline real (veículo e hora do ERP, não
-  aproximado). Uma correção conhecida evita a armadilha oposta: uma versão
-  anterior deste cálculo comparava um lado otimizado de 23 paradas contra
-  um baseline de 38, relatando 81,8% — o comparativo hoje mede sempre o
-  mesmo conjunto de paradas nos dois lados.
+- **A economia medida no dia de locação é pequena: 0,8% (63,7 km → 63,1
+  km, restrito às 15 das 25 paradas atendidas que o baseline consegue
+  colocar em alguma viagem — ver próximo item).** Esse número tem uma
+  história de três correções, cada uma no sentido oposto da anterior, e
+  vale contar as três porque isso é evidência de que a medição está sendo
+  levada a sério, não só o número final:
+  - **81,8%** (bug original): o lado otimizado (23 paradas) era comparado
+    contra um baseline sobre as 38 paradas do dia inteiro — a "economia"
+    incluía trabalho que simplesmente não foi feito, não roteirização
+    melhor.
+  - **36,8%** (Task 13, primeira correção): restringiu os dois lados às
+    mesmas paradas atendidas, mas com uma frota de teste menor (1 caminhão,
+    capacidade 2, 6 viagens) — um placeholder, não a frota final; a própria
+    Task 13 registrou isso como pendência explícita para esta task.
+  - **0,6%** (esta task, primeira medição): com a frota final do seed (2
+    caminhões, capacidade 1), mas com o baseline ainda particionando em
+    blocos fixos de ~12 paradas, ignorando capacidade — fisicamente
+    impossível para uma poliguindaste (uma caçamba por vez). Isso forçava o
+    lado otimizado (que obedece capacidade, em idas e vindas curtas ao
+    depósito) contra um baseline que a ignora (encadeando paradas sem nunca
+    voltar) — o mesmo tipo de erro do 81,8%, só que no sentido inverso:
+    subestimava a economia em vez de inflá-la.
+  - **0,8%** (corrigido): o baseline agora respeita a MESMA frota e
+    capacidade que o otimizador usa (`erp/locacao.py::baseline_order`),
+    simulando a carga ao longo de cada viagem — uma entrega é pré-carregada
+    no depósito e libera espaço ao ser entregue, uma coleta ocupa esse
+    espaço ("sai cheio, volta cheio"), mas nunca mais de uma entrega a
+    bordo ao mesmo tempo. Como o baseline preserva a ordem de lançamento
+    estritamente (o otimizador pode reordenar; este baseline, por
+    definição, não pode), ele só consegue encaixar 15 das 25 paradas
+    atendidas nessa mesma frota de 14 viagens — o comparativo é restrito a
+    essas 15, dos dois lados, para não repetir o erro de medir quantidades
+    de trabalho diferentes.
+  A conclusão honesta: para uma operação de poliguindaste com capacidade 1,
+  a rota já é forçada, pela física, a ser uma sequência de idas e vindas
+  curtas — e isso deixa pouca margem de ganho em quilometragem sobre
+  qualquer ordem razoável. O valor real do otimizador aqui não é km: é
+  **cobertura** (25 das 38 paradas do dia com esta frota, contra só 15
+  numa despacho ingênuo que respeita a mesma ordem e capacidade) e janela de
+  atendimento — não incluído em `percent_km_saved`. No dia de entrega
+  posterior (13/08/2026) a economia é maior e mais representativa: 29,6%
+  (286,3 km → 201,5 km), com baseline real (veículo e hora do ERP, não
+  aproximado, sem essa restrição de cobertura).
 - **O baseline de locação é aproximado.** O ERP não registra veículo nem
-  ordem de rota para locação — o baseline reproduz um operador trabalhando
-  de cima para baixo na lista de lançamento, particionada em blocos de ~12.
-  Isso é sinalizado na tela (`comparison.approximate`) e no comparativo,
-  nunca apresentado como se fosse a rota real executada. O baseline de
-  entrega posterior é real: vem do veículo e horário gravados pelo ERP.
+  ordem de rota para locação — o baseline reproduz um operador despachando
+  a lista de lançamento de cima para baixo para a próxima viagem
+  disponível da MESMA frota configurada, respeitando a capacidade de cada
+  viagem (ver item da economia acima). Isso é sinalizado na tela
+  (`comparison.approximate`) e no comparativo, nunca apresentado como se
+  fosse a rota real executada. O baseline de entrega posterior é real: vem
+  do veículo e horário gravados pelo ERP, por isso não tem essa
+  aproximação nem a restrição de cobertura.
 - Nada é gravado no Firebird do cliente. Escrever a rota de volta em
   `ENTREGA_PCAB` é fase 2.
 - Perfil de rota é `car`. Restrição de caminhão (altura/peso) exige trocar o

@@ -88,7 +88,7 @@ def test_devolucao_vira_pickup(src):
 @pytest.mark.erp
 def test_baseline_agrupa_por_veiculo_do_erp(src):
     stops = src.fetch(ULTIMO, ImportMode.REPLANEJAR)
-    trips = src.baseline_order(stops)
+    trips = src.baseline_order(stops, [])
     assert len(trips) >= 4
     total = sum(len(t.stop_external_ids) for t in trips)
     assert total == len(stops)
@@ -98,6 +98,6 @@ def test_baseline_agrupa_por_veiculo_do_erp(src):
 def test_baseline_respeita_a_hora_registrada(src):
     stops = src.fetch(ULTIMO, ImportMode.REPLANEJAR)
     por_id = {s.external_id: s for s in stops}
-    for t in src.baseline_order(stops):
+    for t in src.baseline_order(stops, []):
         seqs = [por_id[i].erp_sequence for i in t.stop_external_ids]
         assert seqs == sorted(seqs)
