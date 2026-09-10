@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+firebird-driver==1.10.6
+pydantic==2.10.4
+rapidfuzz==3.11.0
+osmium==3.7.0
+httpx==0.28.1
+reportlab==4.2.5
+pytest==8.3.4
+pytest-asyncio==0.25.0

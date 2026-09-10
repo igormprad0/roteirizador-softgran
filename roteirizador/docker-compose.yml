@@ -1,0 +1,40 @@
+services:
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    command: osrm-routed --algorithm ch --max-table-size 10000 /data/regiao.osrm
+    volumes: ["./data/osm:/data"]
+    ports: ["5000:5000"]
+
+  vroom:
+    image: ghcr.io/vroom-project/vroom-docker:v1.14.0
+    environment:
+      VROOM_ROUTER: osrm
+      OSRM_HOST: osrm
+      OSRM_PORT: "5000"
+    volumes: ["./data/vroom:/conf"]
+    ports: ["3000:3000"]
+    depends_on: [osrm]
+
+  firebird:
+    image: firebirdsql/firebird:3
+    environment:
+      FIREBIRD_ROOT_PASSWORD: masterkey
+      FIREBIRD_USER: rotas
+      FIREBIRD_PASSWORD: rotas
+    volumes: ["./data/fdb:/db"]
+    ports: ["3051:3050"]
+
+  api:
+    build: {context: ., dockerfile: Dockerfile.api}
+    environment:
+      OSRM_URL: http://osrm:5000
+      VROOM_URL: http://vroom:3000
+      FDB_HOST: firebird
+      FB_USER: SYSDBA
+      FB_PASSWORD: masterkey
+      LOCAL_DB: /srv/data/local.db
+      STREETS_DB: /srv/data/streets.db
+      OSM_PBF: /srv/data/osm/regiao.osm.pbf
+    volumes: ["./data:/srv/data", "./api:/srv/api", "./web:/srv/web", "./tests:/srv/tests"]
+    ports: ["8000:8000"]
+    depends_on: [osrm, vroom, firebird]
