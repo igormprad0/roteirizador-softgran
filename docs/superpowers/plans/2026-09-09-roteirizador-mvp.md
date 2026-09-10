@@ -108,10 +108,15 @@ EOF
 
 - [ ] **Step 2: `requirements.txt`**
 
+`firebird-driver` **2.0.3**, não 1.10.6: o driver 1.x não instala sob Python 3.11
+quando o pip resolve o `firebird-base` mais novo — `TypeError: issubclass() arg 1
+must be a class` em `firebird/base/config.py`. E `firebird-base` precisa de pin
+explícito, senão o mesmo problema volta no próximo build limpo.
+
 ```
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-firebird-driver==1.10.6
+firebird-driver==2.0.3
 pydantic==2.10.4
 rapidfuzz==3.11.0
 osmium==3.7.0
