@@ -3218,7 +3218,7 @@ def parse_solution(body: dict, job_ids: dict[int, str],
 - [ ] **Step 4: Rodar os testes**
 
 Run: `docker compose run --rm api pytest tests/test_vroom.py -v`
-Expected: 12 passed
+Expected: 11 passed
 
 - [ ] **Step 5: Commit**
 
