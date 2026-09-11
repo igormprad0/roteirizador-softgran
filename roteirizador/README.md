@@ -121,6 +121,35 @@ uma conta de guardanapo em cima de uma amostra de um dia, e o custo por km
 Apresentar como ordem de grandeza — e, de preferência, pedir o custo/km
 real do cliente antes de mostrar.
 
+## Continuar em outra maquina
+
+O repositorio tem 64 arquivos e nenhum dado de cliente. Tres coisas ficam de
+fora de proposito e precisam ser providenciadas na maquina nova:
+
+| o que | tamanho | como obter |
+|---|---|---|
+| `cliente locacao.FDB` e `cliente entrega posterior.FDB` | 4,8 GB | copiar por fora do git (pendrive, rede, nuvem privada) |
+| grafo OSRM (`data/osm/`) | ~500 MB | `scripts/prepare_osm.sh` reconstroi, 20-40 min |
+| indice de ruas (`data/streets.db`) e `data/local.db` | ~100 MB | reconstruidos pelos passos de "Subir do zero" |
+
+Sao dados de cliente e artefatos de build. Fora do git porque nao devem estar
+num repositorio, e porque sao reproduziveis.
+
+Precisa de: Docker Desktop, Git, PowerShell, e internet para baixar o extrato
+do OSM na primeira vez.
+
+```bash
+git clone https://github.com/igormprad0/roteirizador-softgran
+cd roteirizador-softgran/roteirizador
+
+# aponte para onde as bases estao nesta maquina
+powershell -File scripts/copy_fdb.ps1 -Src "D:ases"
+
+# dai em diante e igual a "Subir do zero" abaixo, a partir do prepare_osm.sh
+```
+
+Sem o `-Src`, o script procura os `.fdb` na pasta acima do repositorio.
+
 ## Subir do zero
 
 ```bash
