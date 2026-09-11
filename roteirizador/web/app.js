@@ -123,12 +123,13 @@ $("btn-import").onclick = async () => {
   $("btn-import").disabled = true;
   try {
     const r = await api("/api/stops/import", {method: "POST", body: JSON.stringify(body())});
+    limparAviso();
     state.stops = r.stops;
     state.pickupDropped = (r.counts && r.counts.pickup_dropped) || 0;
     renderCounts(); renderStops(); drawStops(r.stops);
     $("btn-optimize").disabled = r.stops.length === 0;
     $("panel").hidden = true;
-  } catch (e) { alert("Falha ao importar: " + e.message); }
+  } catch (e) { mostrarAviso("Não consegui importar", e.message); }
   finally { $("btn-import").disabled = false; }
 };
 
@@ -293,9 +294,32 @@ $("fleet-save").onclick = async () => {
   $("fleet-dialog").close();
 };
 
+// ---- diagnóstico -----------------------------------------------------------
+// Uma falha sem explicação é um beco sem saída. A faixa diz o que quebrou e
+// qual comando resolve -- os trechos entre crases viram <code>.
+function mostrarAviso(titulo, texto) {
+  const el = $("aviso");
+  const corpo = esc(texto).replace(/`([^`]+)`/g, "<code>$1</code>");
+  el.innerHTML = `<b>${esc(titulo)}</b> — ${corpo}`;
+  el.hidden = false;
+}
+
+function limparAviso() { $("aviso").hidden = true; }
+
 // ---- bootstrap -------------------------------------------------------------
 (async () => {
   const ps = await api("/api/profiles");
   $("profile").innerHTML = ps.map((p) =>
     `<option value="${esc(p.profile)}">${esc(p.label)}</option>`).join("");
+
+  // Avisar ANTES de o usuário clicar em Importar e levar um erro seco.
+  try {
+    const h = await api("/api/health");
+    if (!h.pronto) {
+      const ruins = Object.entries(h.perfis).filter(([, p]) => !p.ok);
+      mostrarAviso(
+        `ERP inacessível (${ruins.map(([n]) => n).join(", ")})`,
+        ruins[0][1].remedio);
+    }
+  } catch (e) { mostrarAviso("Não consegui falar com a API", e.message); }
 })();

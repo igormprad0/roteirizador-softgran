@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
@@ -16,7 +17,26 @@ from .routing.vroom import NoGeocodedStops
 from .routing.optimizer import VroomError
 from .routing.osrm import OsrmError
 
-app = FastAPI(title="Roteirizador Softgran", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    """Falhar no primeiro import deixa o usuário sem pista. Falar na subida,
+    nos logs, transforma um beco sem saída numa instrução."""
+    try:
+        h = service.health()
+        if not h["pronto"]:
+            print("[roteirizador] ATENÇÃO: o ERP não está acessível "
+                  "para todos os perfis.")
+            for nome, p in h["perfis"].items():
+                if not p["ok"]:
+                    print(f"  - {nome}: {p['erro']}")
+                    print(f"    -> {p['remedio']}")
+    except Exception as exc:                          # noqa: BLE001
+        print(f"[roteirizador] não consegui diagnosticar o ERP na subida: {exc}")
+    yield
+
+
+app = FastAPI(title="Roteirizador Softgran", version="0.1.0",
+              lifespan=_lifespan)
 
 WEB = Path("/srv/web")
 if WEB.exists():
@@ -70,6 +90,11 @@ class DepotRequest(BaseModel):
 
 
 # ------------------------------------------------------------------ endpoints
+@app.get("/api/health")
+def health() -> dict:
+    return service.health()
+
+
 @app.get("/api/profiles")
 def profiles() -> list[dict]:
     return [{"profile": p.value, "label": c.label} for p, c in PROFILES.items()]
@@ -77,7 +102,15 @@ def profiles() -> list[dict]:
 
 @app.post("/api/stops/import")
 def import_stops(req: ImportRequest) -> dict:
-    stops, counts = service.import_stops(req.profile, req.date, req.mode)
+    try:
+        stops, counts = service.import_stops(req.profile, req.date, req.mode)
+    except Exception as exc:                          # noqa: BLE001
+        # Só o que sabemos explicar vira resposta amigável. Erro desconhecido
+        # continua subindo -- engolir é como este projeto perde defeito.
+        d = service.diagnosticar_erro_de_base(exc)
+        if d is None:
+            raise
+        raise HTTPException(503, f"{d['erro']} -- {d['remedio']}") from exc
     return {"profile": req.profile.value, "date": req.date.isoformat(),
             "mode": req.mode.value, "counts": counts,
             "stops": [service.stop_payload(s) for s in stops]}

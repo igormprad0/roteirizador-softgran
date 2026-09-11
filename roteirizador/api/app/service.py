@@ -2,6 +2,8 @@ from __future__ import annotations
 import dataclasses
 from datetime import date
 
+import firebird.driver as fb
+
 from .config import ImportMode, PROFILES, Profile, get_settings
 from .db.firebird import connect
 from .db.local import LocalStore
@@ -61,6 +63,72 @@ def viagens_inviaveis(trips: list[BaselineTrip], stops: list[Stop],
             f"{', '.join(excesso_turno[:3])}"
             + (" ..." if len(excesso_turno) > 3 else ""))
     return motivos
+
+
+# ---------------------------------------------------------------- diagnostico
+# Um erro de banco que a gente sabe explicar vale mais que um stack trace.
+# Isto nasceu de um caso real: recopiar os `.fdb` apaga os privilégios do
+# usuário `rotas`, e a tela respondia "Falha ao importar" com a causa
+# enterrada num HTTP 500. Quem instala numa máquina nova não tem como
+# adivinhar que a resposta é rodar um script.
+_SINTOMAS = (
+    ("sem_permissao",
+     ("no permission",),
+     "A API lê o ERP como usuário `rotas`, e essa cópia da base não deu "
+     "SELECT para ele. Isso acontece toda vez que os .fdb são recopiados: "
+     "eles chegam do cliente sem privilégio nenhum. Rode "
+     "`./scripts/grant_rotas.sh` (na pasta roteirizador/) e tente de novo."),
+    ("base_ausente",
+     ("createfile (open)", "no such file", "unavailable database",
+      "error while trying to open file"),
+     "A cópia da base não está em data/fdb/. Rode "
+     "`powershell -File scripts/copy_fdb.ps1` (use -Src se os .fdb estiverem "
+     "noutra pasta) e depois `./scripts/grant_rotas.sh`."),
+    ("sem_conexao",
+     ("connection refused", "unable to complete network request",
+      "failed to establish a connection"),
+     "O container do Firebird não está respondendo. Rode "
+     "`docker compose up -d firebird` e espere uns 20 segundos."),
+)
+
+
+def diagnosticar_erro_de_base(erro: BaseException) -> dict | None:
+    """Traduz um erro conhecido do Firebird em causa + remédio.
+
+    Devolve None para o que não sabemos explicar -- inventar remédio para
+    erro desconhecido manda o usuário para o lugar errado, e engolir o erro
+    é como este projeto perde defeito.
+    """
+    if not isinstance(erro, fb.DatabaseError):
+        return None
+    texto = str(erro).lower()
+    for causa, marcadores, remedio in _SINTOMAS:
+        if any(m in texto for m in marcadores):
+            return {"causa": causa, "remedio": remedio, "erro": str(erro).strip()}
+    return None
+
+
+def health() -> dict:
+    """Cada perfil: dá para ler o ERP? Se não, por quê e o que fazer."""
+    perfis: dict[str, dict] = {}
+    for profile in Profile:
+        try:
+            with connect(profile) as conn:
+                n = conn.query("SELECT COUNT(*) AS N FROM CLIFOR")[0]["N"]
+            perfis[profile.value] = {"ok": True, "clientes": int(n),
+                                     "base": PROFILES[profile].database}
+        except Exception as exc:                      # noqa: BLE001
+            d = diagnosticar_erro_de_base(exc)
+            perfis[profile.value] = {
+                "ok": False,
+                "base": PROFILES[profile].database,
+                "erro": (d or {}).get("erro", str(exc).strip().splitlines()[0]),
+                "causa": (d or {}).get("causa", "desconhecida"),
+                "remedio": (d or {}).get(
+                    "remedio", "Causa não reconhecida -- veja "
+                               "`docker compose logs api`."),
+            }
+    return {"pronto": all(p["ok"] for p in perfis.values()), "perfis": perfis}
 
 
 def store() -> LocalStore:

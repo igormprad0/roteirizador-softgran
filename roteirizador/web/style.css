@@ -58,3 +58,10 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left}
 td input[type=number]{width:70px}
 menu{display:flex;gap:8px;justify-content:flex-end;padding:12px 0 0;margin:0}
 .leaflet-container{background:#0a1119}
+
+/* Faixa de diagnóstico: o que está errado e o que fazer a respeito. */
+.aviso{background:#3a2416;border-bottom:1px solid var(--low);color:#f2d5c4;
+       padding:10px 16px;font-size:13px;line-height:1.5}
+.aviso b{color:var(--low)}
+.aviso code{background:#101b26;border:1px solid var(--line);border-radius:4px;
+            padding:1px 6px;font-size:12px}
